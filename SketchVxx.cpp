@@ -6,7 +6,7 @@
 
 /*
 
-Developed from SketchV10
+
 v3 working with Uno and Promini.  Mirror file on AtmelStudio
 v4 with inclusion of OneWire to read DS18b20 digital thermometer
 project soilSensev6 has a stable method to measure frequency
@@ -18,11 +18,9 @@ there is a problem with the variation calculation for large values of nCount
 v7 change timing of measurement loop to reduce polarisation
 v8 distribute soil probe measurements uniformly
 improve the estimate of measurement time
-v10 change the interval between measurements to show effect of polarisation
 
-simpleSoilSense
-v1 use overrun interrupt on timer2 rather than a low frequency clock
-
+adds overrun interrupt for TIMER2
+replaces INT1 with direct monitoring of D3
 */
 
 #include <OneWire.h>
@@ -35,8 +33,7 @@ v1 use overrun interrupt on timer2 rather than a low frequency clock
 #include <avr/sleep.h>
 #include <avr/pgmspace.h>
 
-#define INC_OVERFLOW_COUNTER() count += 1
-#define INC_COUNTER() overFlowCount += 1
+#define INC_COUNT() overFlowCount += 1
 #define USE_SER 0
 
 
@@ -44,8 +41,10 @@ v1 use overrun interrupt on timer2 rather than a low frequency clock
 
 
 
+//Note: an object of this class was already pre-instantiated in the .cpp file of this library, so you can simply access its methods (functions)
+//      directly now through the object name "timer2"
+//eRCaGuy_Timer2_Counter timer2;  //this is what the pre-instantiation line from the .cpp file looks like
 
-volatile uint16_t count;
 volatile uint32_t overFlowCount;
 
 const int interruptPin = 3;
@@ -61,15 +60,14 @@ const byte digT_pin = 8;
 
 uint8_t preScaler[8] = {0, 0, 3, 5, 6, 7, 8, 10}; // powers of 2
 const uint8_t clockFrequency = 4; // i.e. 2^4 in MHz
-uint8_t preScalerSelect[2] = {6, 1}; // i.e. first pass divide by 256 : second by 1
+uint8_t preScalerSelect = 1; // i.e.divide by 1
 const uint8_t nCount = 8; // number to average is 2^nCount
 
 int pinPower = pinPower1;
 bool measureOsc1 = true; // first measurement is for osc1
 bool initialized = true; // when false can use for debug/learn
 // store results here
-uint32_t meanResults[2];
-uint32_t variationResults[2];
+uint32_t meanResults;
 
 
 
@@ -93,7 +91,7 @@ const byte nVcc = 6; // ADC reads to determine Vcc; power of 2
 
 extern volatile unsigned long timer0_millis;
 const uint32_t periodStatusReport = 600000L;
-const uint32_t periodOscReport = 30000L;
+uint32_t periodOscReport = 30000L; // changed to check effect of polarisation
 uint32_t nextStatusReport = 0L;
 uint32_t nextOscReport = 0L;
 uint32_t now = 0L; // beginning of time
@@ -132,16 +130,11 @@ typedef struct {
 PayloadItem2 payloadStatus;
 
 
-//////////////////////////////////Initialise the ISR for INT1///////////////////////////////////////
+//////////////////////////////////Initialise the ISR///////////////////////////////////////
 
-ISR(INT1_vect) {
-	INC_COUNTER();
-}
-
-//////////////////////////////////Initialise the ISR for TIMER2 OVERFLOW///////////////////////////////////////
-
-ISR(TIMER2_OVF_vect) {
-	INC_OVERFLOW_COUNTER();
+ISR(TIMER2_OVF_vect) //Timer2's counter has overflowed
+ {
+	INC_COUNT();
 }
 
 //////////////////////////////////flashLED///////////////////////////////////////
@@ -181,7 +174,9 @@ void setup()
 	//-To do this we must make WGM22, WGM21, & WGM20, within TCCR2A & TCCR2B, all have values of 0.
 	TCCR2A &= 0b11111100; //set WGM21 & WGM20 to 0 (see datasheet pg. 155).
 	TCCR2B &= 0b11110111; //set WGM22 to 0 (see pg. 158).
-	TIMSK2 &= ~(_BV(TOIE2)); // no overflow
+	// no overflow to enable longer period in powersave
+			setPrescaler(preScalerSelect);
+
 	
 	// Initialise the IO
 	if (!driver.init())
@@ -453,6 +448,7 @@ void loop()
 		// start measuring using power save
 		
 		// loop through coarse then fine measurement
+		uint8_t j = (byte)coarse; // a global state variable seemed more elegant than a global index variable;
 		digitalWrite(pinPower, HIGH); // power-up oscillator
 		digitalWrite(pinPowerCounter, HIGH); // power-up counter board
 		
@@ -460,69 +456,45 @@ void loop()
 		timer0_millis += 2000L;
 		// To do:  check whether can shorten sleep to reduce power consumption
 
-		set_sleep_mode(SLEEP_MODE_PWR_SAVE); // sleep while timer2 counts
 
-		setPrescaler(preScalerSelect[0]); // To do: no longer need array here; move to setup()
+		uint32_t maxCounts = ( 1 << nCount ); // keep as powers of 2
+		uint32_t result = 0L;
+		overFlowCount = 0;
+		
+		
+		
+	TIMSK2 |= _BV(TOIE2);
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
 
-		uint32_t sumX = 0;
-		uint32_t sumX2 = 0;
-		uint16_t maxCounts = ( 1 << nCount ); // keep as powers of 2
-		overFlowCount = 0; // zero overrun counter
-		TIMSK2 &= ~(_BV(TOIE2)); // no overflow
-		cli();
-		// enable INT1 interrupt on change; To do: move to setup()
-		EICRA = 0x0c;  // INT1 – rising edge on SCL
-		EIMSK = 0x02;  // enable only int1
-		count = 0xffff;  // trigger on zero
-		sei();
-		while (count != 0) {;;} // wait until first rising edge
-		TCNT2 = 0; // zero timer 2 counter
-		TIMSK2 |= _BV(TOIE2); // interrupt on overflow
-		while (count < maxCounts) {;;} // maxCounts rising edges
-			cli();
-		TIMSK2 &= ~(_BV(TOIE2)); // no interrupt on overflow
-			boolean flag_save = TIFR2 | 0x1; //grab the timer2 overflow flag value; see datasheet pg. 160
-			_errorWatch = false;
-			if (flag_save) { //if the overflow flag is set
-				tcnt2_save = TCNT2; //update variable just saved since the overflow flag could have just tripped between previously saving the TCNT2 value and reading bit 0 of TIFR2.
-				//If this is the case, TCNT2 might have just changed from 255 to 0, and so we need to grab the new value of TCNT2 to prevent an error of up
-				//to 127.5us in any time obtained using the T2 counter (ex: T2_micros). (Note: 255 counts / 2 counts/us = 127.5us)
-				//Note: this line of code DID in fact fix the error just described, in which I periodically saw an error of ~127.5us in some values read in
-				//by some PWM read code I wrote.
-				_overflow_count++; //force the overflow count to increment
-				_errorWatch = true;
-				TIFR2 |= 0b00000001; //reset Timer2 overflow flag since we just manually incremented above; see datasheet pg. 160; this prevents execution of Timer2's overflow ISR
-			}
-		sumX = (overFlowCount << 8) | TCNT2;
-		
-			
-
-		
-		
-		
-		/*
 		for (uint32_t i = 0; i < maxCounts; i++)
 		{
-		cli();
-		sleep_enable();
-		TCNT2 = 0; //reset Timer2 counter.  Not necessary?
-		sei();
-		sleep_cpu();
-		//LowPower.powerSave(SLEEP_FOREVER, ADC_OFF, BOD_ON, TIMER2_ON);
-		uint8_t oldCount = count;
-		sei();
-		sleep_cpu();
-		//LowPower.powerSave(SLEEP_FOREVER, ADC_OFF, BOD_ON, TIMER2_ON);
-		uint8_t newCount = count;
-		// store result
-		uint8_t delta = newCount - oldCount;
-		sumX += delta;
-		sumX2 += delta * delta;
+			cli();
+			sleep_enable();
+			TCNT2 = 0; //reset Timer2 counter.  Not necessary?
+			sei();
+			sleep_cpu();
+			//LowPower.powerSave(SLEEP_FOREVER, ADC_OFF, BOD_ON, TIMER2_ON);
+			uint8_t oldCount = count;
+			sei();
+			sleep_cpu();
+			//LowPower.powerSave(SLEEP_FOREVER, ADC_OFF, BOD_ON, TIMER2_ON);
+			uint8_t newCount = count;
+			// store result
+			uint8_t delta = newCount - oldCount;
+			sumX += delta;
+			sumX2 += delta * delta;
 		}
 		sleep_disable();
 		sei();
-		*/
-
 		EIMSK = 0x00;  // disable all external interrupts
 		digitalWrite(pinPower, LOW); // power-down oscillator
 		digitalWrite(pinPowerCounter, LOW); // power-down counter board
@@ -530,29 +502,9 @@ void loop()
 
 		// Calculate mean and variation
 		
-		meanResults[j] = sumX; // Store mean * n
-		variationResults[j] = sumX2; // Require nCount =< 16 and count < 256, otherwise this will overflow
-		if (nCount < 9)
-		{
-			variationResults[j] -= ((sumX * sumX) >> nCount); // Calculate variation with bitshift divide.  Store variation * (n - 1)
-		}
-		else
-		{
-			variationResults[j] -= ((sumX  >> (nCount >> 1)) * (sumX  >> (nCount - (nCount >> 1)))); // to avoid overflow
-		}
-		if (variationResults[j] & 0x80000000) variationResults[j] = 0;  // trap negative value of variance
-		variationResults[j] = bitDiv(variationResults[j] << 4, nCount);  // report 16 * variance
-		
-		if (variationResults[j] & 0xffffff00) variationResults[j] = 0xff;  // trap large value of variance; require variation less than 256
+		result = sumX; // Store mean * n
 		
 		
-		if (!coarse) // Calculate final results and send
-		{
-			// merge the coarse and fine measurements into finalCount giving precedence to bits from the fine measurement
-			int8_t m = preScaler[preScalerSelect[0]] - preScaler[preScalerSelect[1]];
-			uint32_t finalCount = meanResults[0] << m;  // shift the coarse measurement to the left
-			finalCount &= (0xffffffff << (8 + nCount)); // clear the last 8 + nCount bits of the coarse measurement
-			finalCount |= meanResults[1];  // merge
 			
 			/*
 			locate the binary point for the count:  8 + nCount bits in total; the binary point is to the right of the nCount bit
@@ -563,7 +515,7 @@ void loop()
 			payloadTime.bin2usCoarse = clockFrequency +  nCount - preScaler[preScalerSelect[0]];
 			payloadTime.bin2usFine = clockFrequency +  nCount - preScaler[preScalerSelect[1]];
 			
-			uint32_t time2Measure = meanResults[0] << (preScaler[preScalerSelect[0]] - clockFrequency + 1);// approximate estimate in usec; +1 since omit alternate cycles
+			uint32_t time2Measure = result << (preScaler[preScalerSelect] - clockFrequency + 1);// approximate estimate in usec; +1 since omit alternate cycles
 			timer0_millis += roundDiv(time2Measure , 1000L);
 
 			#if USE_SER
@@ -592,19 +544,9 @@ void loop()
 			Serial.print(F("time= "));
 			Serial.print(timer0_millis);
 			Serial.print(F(" finalCoarse= "));
-			Serial.print(meanResults[0] >> convert2Microsec);
+			Serial.print(result >> convert2Microsec);
 			Serial.print(F("."));
-			Serial.print(((meanResults[0] & ((1L << convert2Microsec) - 1L)) * 100) >> convert2Microsec);
-			
-			//Now for the fine measurement
-			convert2Microsec = payloadTime.bin2usFine;
-			
-			Serial.print(F(" finalHex= "));
-			Serial.print(finalCount, HEX);
-			Serial.print(F(" final= "));
-			Serial.print(finalCount >> convert2Microsec);
-			Serial.print(F("."));
-			Serial.println(((finalCount & ((1L << convert2Microsec) - 1L)) * 10000) >> convert2Microsec);
+			Serial.print(((result & ((1L << convert2Microsec) - 1L)) * 100) >> convert2Microsec);
 			Serial.flush();
 			Serial.end();
 			
@@ -618,10 +560,10 @@ void loop()
 			// with the original measurements and the positions of the binary point to convert them to microsec
 			// 14 bytes in packet
 			payloadTime.nodeId = (node | ((byte)measureOsc1 << 4)); // bit 5
-			payloadTime.varCoarse = variationResults[0];
-			payloadTime.varFine = variationResults[1];
-			payloadTime.coarseTime = meanResults[0];
-			payloadTime.fineTime = finalCount;
+			payloadTime.varCoarse = 0;
+			payloadTime.varFine = 0;
+			payloadTime.coarseTime = result;
+			payloadTime.fineTime = 0;
 			sendTimePacket();
 			
 			
@@ -634,8 +576,11 @@ void loop()
 			// switch pins ready for next measurement
 			measureOsc1 = !measureOsc1;
 			pinPower = (measureOsc1 ? pinPower1 : pinPower2);
-		}
-		coarse = !coarse; // alternate coarse and fine
+			if (measureOsc1)
+			{
+				periodOscReport += 30000L;
+				if (periodOscReport > 240000L) periodOscReport = 30000L;
+			}
 	} // end measureOsc
 	
 } // end loop()
