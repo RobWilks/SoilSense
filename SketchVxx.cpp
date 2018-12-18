@@ -6,7 +6,7 @@
 
 /*
 
-
+Developed from SketchV10
 v3 working with Uno and Promini.  Mirror file on AtmelStudio
 v4 with inclusion of OneWire to read DS18b20 digital thermometer
 project soilSensev6 has a stable method to measure frequency
@@ -18,6 +18,11 @@ there is a problem with the variation calculation for large values of nCount
 v7 change timing of measurement loop to reduce polarisation
 v8 distribute soil probe measurements uniformly
 improve the estimate of measurement time
+v10 change the interval between measurements to show effect of polarisation
+
+simpleSoilSense
+v1 use overrun interrupt on timer2 rather than a low frequency clock
+
 */
 
 #include <OneWire.h>
