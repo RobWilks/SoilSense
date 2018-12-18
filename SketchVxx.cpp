@@ -16,6 +16,7 @@ the MC is in powersave during the measurement
 measurement is started and terminated on the rising edge of the signal to INT1 (pin3)
 there is a problem with the variation calculation for large values of nCount
 v7 change timing of measurement loop to reduce polarisation
+v8 distribute soil probe measurements uniformly
 improve the estimate of measurement time
 */
 
@@ -62,6 +63,7 @@ const uint8_t nCount = 8; // number to average is 2^nCount
 
 int pinPower = pinPower1;
 bool measureOsc1 = true; // first measurement is for osc1
+bool coarse = true; // first measurement is coarse; next fine
 bool initialized = true; // when false can use for debug/learn
 
 
@@ -434,7 +436,7 @@ void loop()
 	if (now > nextOscReport)
 	{
 		// measure osc
-		nextOscReport = now + periodOscReport;
+		nextOscReport = now + (periodOscReport >> 1); // divide by 2 since report on alternate cycles so as to reduce polarisation
 
 
 		// start measuring using power save
@@ -444,166 +446,158 @@ void loop()
 		uint32_t variationResults[2];
 		
 		// loop through coarse then fine measurement
-		for (uint8_t j = 0; j < 2; j++)
-			// To do:  check effect of dispersing measurements so as to reduce polarisation
+		uint8_t j = (byte)coarse; // a global state variable seemed more elegant than a global index variable;
+		digitalWrite(pinPower, HIGH); // power-up oscillator
+		digitalWrite(pinPowerCounter, HIGH); // power-up counter board
+		
+		LowPower.powerDown(SLEEP_2S, ADC_OFF, BOD_OFF); // allow oscillator to stabilise before measuring frequency
+		timer0_millis += 2000;
+		// To do:  check whether can shorten sleep to reduce power consumption
+
+		set_sleep_mode(SLEEP_MODE_PWR_SAVE); // sleep while timer2 counts
+
+		setPrescaler(preScalerSelect[j]);
+		// enable INT1 interrupt on change
+		EICRA = 0x0c;  // INT1 – rising edge on SCL
+		EIMSK = 0x02;  // enable only int1
+
+		uint32_t sumX = 0;
+		uint32_t sumX2 = 0;
+		uint32_t maxCounts = ( 1 << nCount ); // keep as powers of 2
+
+		for (uint32_t i = 0; i < maxCounts; i++)
 		{
-			digitalWrite(pinPower, HIGH); // power-up oscillator
-			digitalWrite(pinPowerCounter, HIGH); // power-up counter board
-			
-			LowPower.powerDown(SLEEP_4S, ADC_OFF, BOD_OFF); // allow oscillator to stabilise before measuring frequency
-			timer0_millis += 4000;
-			// To do:  check whether can shorten sleep to reduce power consumption
-
-			set_sleep_mode(SLEEP_MODE_PWR_SAVE); // sleep while timer2 counts
-
-			setPrescaler(preScalerSelect[j]);
-			// enable INT1 interrupt on change
-			EICRA = 0x0c;  // INT1 – rising edge on SCL
-			EIMSK = 0x02;  // enable only int1
-
-			uint32_t sumX = 0;
-			uint32_t sumX2 = 0;
-			uint32_t maxCounts = ( 1 << nCount ); // keep as powers of 2
-
-			for (uint32_t i = 0; i < maxCounts; i++)
-			{
-				cli();
-				sleep_enable();
-				TCNT2 = 0; //reset Timer2 counter.  Not necessary?
-				sei();
-				sleep_cpu();
-				//LowPower.powerSave(SLEEP_FOREVER, ADC_OFF, BOD_ON, TIMER2_ON);
-				uint8_t oldCount = count;
-				sei();
-				sleep_cpu();
-				//LowPower.powerSave(SLEEP_FOREVER, ADC_OFF, BOD_ON, TIMER2_ON);
-				uint8_t newCount = count;
-				// store result
-				uint8_t delta = newCount - oldCount;
-				sumX += delta;
-				sumX2 += delta * delta;
-			}
-			sleep_disable();
+			cli();
+			sleep_enable();
+			TCNT2 = 0; //reset Timer2 counter.  Not necessary?
 			sei();
-			EIMSK = 0x00;  // disable all external interrupts
-			digitalWrite(pinPower, LOW); // power-down oscillator
-			digitalWrite(pinPowerCounter, LOW); // power-down counter board
-
-
-			// Calculate mean and variation
-			
-			meanResults[j] = sumX; // Store mean * n
-			variationResults[j] = sumX2; // Require nCount =< 16 and count < 256, otherwise this will overflow
-			if (nCount < 9)
-			{
-				variationResults[j] -= ((sumX * sumX) >> nCount); // Calculate variation with bitshift divide.  Store variation * (n - 1)
-			}
-			else
-			{
-				variationResults[j] -= ((sumX  >> (nCount >> 1)) * (sumX  >> (nCount - (nCount >> 1)))); // to avoid overflow
-			}
-			if (variationResults[j] & 0x80000000) variationResults[j] = 0;  // trap negative value of variance
-			variationResults[j] = bitDiv(variationResults[j] << 4, nCount);  // report 16 * variance
-			
-			if (variationResults[j] & 0xffffff00) variationResults[j] = 0xff;  // trap large value of variance; require variation less than 256
-			
-			if (j == 0) //wait to reduce effect of polarisation
-			{
-				LowPower.powerDown(SLEEP_8S, ADC_OFF, BOD_OFF); // allow oscillator to stabilise before measuring frequency
-				LowPower.powerDown(SLEEP_8S, ADC_OFF, BOD_OFF); // allow oscillator to stabilise before measuring frequency
-				timer0_millis += 16000L;
-			}
-
-		} // end of coarse / fine measurement loop
-		
-
-
-		// merge the coarse and fine measurements into finalCount giving precedence to bits from the fine measurement
-		int8_t m = preScaler[preScalerSelect[0]] - preScaler[preScalerSelect[1]];
-		uint32_t finalCount = meanResults[0] << m;  // shift the coarse measurement to the left
-		finalCount &= (0xffffffff << (8 + nCount)); // clear the last 8 + nCount bits of the coarse measurement
-		finalCount |= meanResults[1];  // merge
-		
-		/*
-		locate the binary point for the count:  8 + nCount bits in total; the binary point is to the right of the nCount bit
-		with enumeration of bits 0, 1, 2, 3 . . .
-		*/
-		
-		//to convert to microsec: divide count by clockFrequency; divide by nCount; multiply by prescaler
-		payloadTime.bin2usCoarse = clockFrequency +  nCount - preScaler[preScalerSelect[0]];
-		payloadTime.bin2usFine = clockFrequency +  nCount - preScaler[preScalerSelect[1]];
-		
-		uint32_t time2Measure = meanResults[0] >> (payloadTime.bin2usCoarse - 2);// approximate estimate in usec; -1 since omit alternate cycles; -1 since coarse and fine
-		timer0_millis += roundDiv(time2Measure , 1000L);
-
-		#if USE_SER
-
-		//print result
-		Serial.begin(115200);
-		delay(1000); // no need for sleep to save power since running serial
-		
-		for (uint8_t i = 0; i < 2; i++)
-		{
-			Serial.print(F("Variation= "));
-			Serial.print(variationResults[i]);
-			Serial.print(F(" "));
+			sleep_cpu();
+			//LowPower.powerSave(SLEEP_FOREVER, ADC_OFF, BOD_ON, TIMER2_ON);
+			uint8_t oldCount = count;
+			sei();
+			sleep_cpu();
+			//LowPower.powerSave(SLEEP_FOREVER, ADC_OFF, BOD_ON, TIMER2_ON);
+			uint8_t newCount = count;
+			// store result
+			uint8_t delta = newCount - oldCount;
+			sumX += delta;
+			sumX2 += delta * delta;
 		}
-		
-		/*
-		Converting binary fractions to decimal ones
-		power of 10 determines number of decimal places
-		n decimal ~ m binary * log10(2)
-		divide number of binary places by 3 to find power of 10
-		*/
-
-		//First print coarse measurement
-		int8_t convert2Microsec = payloadTime.bin2usCoarse;
-		
-		Serial.print(F("time= "));
-		Serial.print(timer0_millis);
-		Serial.print(F(" finalCoarse= "));
-		Serial.print(meanResults[0] >> convert2Microsec);
-		Serial.print(F("."));
-		Serial.print(((meanResults[0] & ((1L << convert2Microsec) - 1L)) * 100) >> convert2Microsec);
-		
-		//Now for the fine measurement
-		convert2Microsec = payloadTime.bin2usFine;
-		
-		Serial.print(F(" finalHex= "));
-		Serial.print(finalCount, HEX);
-		Serial.print(F(" final= "));
-		Serial.print(finalCount >> convert2Microsec);
-		Serial.print(F("."));
-		Serial.println(((finalCount & ((1L << convert2Microsec) - 1L)) * 10000) >> convert2Microsec);
-		Serial.flush();
-		Serial.end();
-		
-		
-		
-		
-		#endif // USE_SER
-		
-		
-		// assemble packet
-		// with the original measurements and the positions of the binary point to convert them to microsec
-		// 14 bytes in packet
-		payloadTime.nodeId = (node | (measureOsc1 << 4)); // bit 5
-		payloadTime.varCoarse = variationResults[0];
-		payloadTime.varFine = variationResults[1];
-		payloadTime.coarseTime = meanResults[0];
-		payloadTime.fineTime = finalCount;
-		sendTimePacket();
-		
-		
+		sleep_disable();
+		sei();
+		EIMSK = 0x00;  // disable all external interrupts
+		digitalWrite(pinPower, LOW); // power-down oscillator
+		digitalWrite(pinPowerCounter, LOW); // power-down counter board
 
 
-
-
-
+		// Calculate mean and variation
 		
-		// switch pins ready for next measurement
-		measureOsc1 = !measureOsc1;
-		pinPower = (measureOsc1 ? pinPower1 : pinPower2);
+		meanResults[j] = sumX; // Store mean * n
+		variationResults[j] = sumX2; // Require nCount =< 16 and count < 256, otherwise this will overflow
+		if (nCount < 9)
+		{
+			variationResults[j] -= ((sumX * sumX) >> nCount); // Calculate variation with bitshift divide.  Store variation * (n - 1)
+		}
+		else
+		{
+			variationResults[j] -= ((sumX  >> (nCount >> 1)) * (sumX  >> (nCount - (nCount >> 1)))); // to avoid overflow
+		}
+		if (variationResults[j] & 0x80000000) variationResults[j] = 0;  // trap negative value of variance
+		variationResults[j] = bitDiv(variationResults[j] << 4, nCount);  // report 16 * variance
+		
+		if (variationResults[j] & 0xffffff00) variationResults[j] = 0xff;  // trap large value of variance; require variation less than 256
+		
+		
+		if (!coarse) // Calculate final results and send
+		{
+			// merge the coarse and fine measurements into finalCount giving precedence to bits from the fine measurement
+			int8_t m = preScaler[preScalerSelect[0]] - preScaler[preScalerSelect[1]];
+			uint32_t finalCount = meanResults[0] << m;  // shift the coarse measurement to the left
+			finalCount &= (0xffffffff << (8 + nCount)); // clear the last 8 + nCount bits of the coarse measurement
+			finalCount |= meanResults[1];  // merge
+			
+			/*
+			locate the binary point for the count:  8 + nCount bits in total; the binary point is to the right of the nCount bit
+			with enumeration of bits 0, 1, 2, 3 . . .
+			*/
+			
+			//to convert to microsec: divide count by clockFrequency; divide by nCount; multiply by prescaler
+			payloadTime.bin2usCoarse = clockFrequency +  nCount - preScaler[preScalerSelect[0]];
+			payloadTime.bin2usFine = clockFrequency +  nCount - preScaler[preScalerSelect[1]];
+			
+			uint32_t time2Measure = meanResults[0] << (preScaler[preScalerSelect[0]] - clockFrequency + 1);// approximate estimate in usec; +1 since omit alternate cycles
+			timer0_millis += roundDiv(time2Measure , 1000L);
+
+			#if USE_SER
+
+			//print result
+			Serial.begin(115200);
+			delay(1000); // no need for sleep to save power since running serial
+			
+			for (uint8_t i = 0; i < 2; i++)
+			{
+				Serial.print(F("Variation= "));
+				Serial.print(variationResults[i]);
+				Serial.print(F(" "));
+			}
+			
+			/*
+			Converting binary fractions to decimal ones
+			power of 10 determines number of decimal places
+			n decimal ~ m binary * log10(2)
+			divide number of binary places by 3 to find power of 10
+			*/
+
+			//First print coarse measurement
+			int8_t convert2Microsec = payloadTime.bin2usCoarse;
+			
+			Serial.print(F("time= "));
+			Serial.print(timer0_millis);
+			Serial.print(F(" finalCoarse= "));
+			Serial.print(meanResults[0] >> convert2Microsec);
+			Serial.print(F("."));
+			Serial.print(((meanResults[0] & ((1L << convert2Microsec) - 1L)) * 100) >> convert2Microsec);
+			
+			//Now for the fine measurement
+			convert2Microsec = payloadTime.bin2usFine;
+			
+			Serial.print(F(" finalHex= "));
+			Serial.print(finalCount, HEX);
+			Serial.print(F(" final= "));
+			Serial.print(finalCount >> convert2Microsec);
+			Serial.print(F("."));
+			Serial.println(((finalCount & ((1L << convert2Microsec) - 1L)) * 10000) >> convert2Microsec);
+			Serial.flush();
+			Serial.end();
+			
+			
+			
+			
+			#endif // USE_SER
+			
+			
+			// assemble packet
+			// with the original measurements and the positions of the binary point to convert them to microsec
+			// 14 bytes in packet
+			payloadTime.nodeId = (node | (measureOsc1 << 4)); // bit 5
+			payloadTime.varCoarse = variationResults[0];
+			payloadTime.varFine = variationResults[1];
+			payloadTime.coarseTime = meanResults[0];
+			payloadTime.fineTime = finalCount;
+			sendTimePacket();
+			
+			
+
+
+
+
+
+			
+			// switch pins ready for next measurement
+			measureOsc1 = !measureOsc1;
+			pinPower = (measureOsc1 ? pinPower1 : pinPower2);
+		}
+		coarse = !coarse; // alternate coarse and fine
 	} // end measureOsc
 	
 } // end loop()
