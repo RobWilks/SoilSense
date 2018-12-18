@@ -1,11 +1,5 @@
-﻿/*Begining of Auto generated code by Atmel studio */
-#include <Arduino.h>
-
-/*End of auto generated code by Atmel studio */
-
 /*Begining of Auto generated code by Atmel studio */
 #include <Arduino.h>
-
 /*End of auto generated code by Atmel studio */
 
 
@@ -21,6 +15,8 @@ the second result is obtained only from the measurement at the lowest frequency
 the MC is in powersave during the measurement
 measurement is started and terminated on the rising edge of the signal to INT1 (pin3)
 there is a problem with the variation calculation for large values of nCount
+v7 change timing of measurement loop to reduce polarisation
+improve the estimate of measurement time
 */
 
 #include <Arduino.h>
@@ -440,13 +436,6 @@ void loop()
 		// measure osc
 		nextOscReport = now + periodOscReport;
 
-		digitalWrite(pinPower, HIGH); // power-up oscillator
-		digitalWrite(pinPowerCounter, HIGH); // power-up counter board
-		
-		LowPower.powerDown(SLEEP_2S, ADC_OFF, BOD_OFF); // allow oscillator to stabilise before measuring frequency
-		timer0_millis += 2000;
-
-		set_sleep_mode(SLEEP_MODE_PWR_SAVE); // sleep while timer2 counts
 
 		// start measuring using power save
 		
@@ -456,7 +445,16 @@ void loop()
 		
 		// loop through coarse then fine measurement
 		for (uint8_t j = 0; j < 2; j++)
+			// To do:  check effect of dispersing measurements so as to reduce polarisation
 		{
+			digitalWrite(pinPower, HIGH); // power-up oscillator
+			digitalWrite(pinPowerCounter, HIGH); // power-up counter board
+			
+			LowPower.powerDown(SLEEP_4S, ADC_OFF, BOD_OFF); // allow oscillator to stabilise before measuring frequency
+			timer0_millis += 4000;
+			// To do:  check whether can shorten sleep to reduce power consumption
+
+			set_sleep_mode(SLEEP_MODE_PWR_SAVE); // sleep while timer2 counts
 
 			setPrescaler(preScalerSelect[j]);
 			// enable INT1 interrupt on change
@@ -488,8 +486,11 @@ void loop()
 			sleep_disable();
 			sei();
 			EIMSK = 0x00;  // disable all external interrupts
+			digitalWrite(pinPower, LOW); // power-down oscillator
+			digitalWrite(pinPowerCounter, LOW); // power-down counter board
 
 
+			// Calculate mean and variation
 			
 			meanResults[j] = sumX; // Store mean * n
 			variationResults[j] = sumX2; // Require nCount =< 16 and count < 256, otherwise this will overflow
@@ -505,11 +506,16 @@ void loop()
 			variationResults[j] = bitDiv(variationResults[j] << 4, nCount);  // report 16 * variance
 			
 			if (variationResults[j] & 0xffffff00) variationResults[j] = 0xff;  // trap large value of variance; require variation less than 256
+			
+			if (j == 0) //wait to reduce effect of polarisation
+			{
+				LowPower.powerDown(SLEEP_8S, ADC_OFF, BOD_OFF); // allow oscillator to stabilise before measuring frequency
+				LowPower.powerDown(SLEEP_8S, ADC_OFF, BOD_OFF); // allow oscillator to stabilise before measuring frequency
+				timer0_millis += 16000L;
+			}
+
 		} // end of coarse / fine measurement loop
 		
-		digitalWrite(pinPower, LOW); // power-down oscillator
-		digitalWrite(pinPowerCounter, LOW); // power-down counter board
-		// To do: experiment with delay between coarse and fin emasurements to reduce polarisation effect; power down oscillator after each?
 
 
 		// merge the coarse and fine measurements into finalCount giving precedence to bits from the fine measurement
@@ -527,15 +533,14 @@ void loop()
 		payloadTime.bin2usCoarse = clockFrequency +  nCount - preScaler[preScalerSelect[0]];
 		payloadTime.bin2usFine = clockFrequency +  nCount - preScaler[preScalerSelect[1]];
 		
-		uint32_t time2Measure = meanResults[0] >> (clockFrequency - preScaler[preScalerSelect[0]] - 1);// approximate estimate in usec; -1 since omit alternate cycles
-		// To do: check the math; should use the same result as sent to serial. Also need another factor of 2 since coarse and fine
+		uint32_t time2Measure = meanResults[0] >> (payloadTime.bin2usCoarse - 2);// approximate estimate in usec; -1 since omit alternate cycles; -1 since coarse and fine
 		timer0_millis += roundDiv(time2Measure , 1000L);
 
 		#if USE_SER
 
 		//print result
 		Serial.begin(115200);
-		delay(1000);
+		delay(1000); // no need for sleep to save power since running serial
 		
 		for (uint8_t i = 0; i < 2; i++)
 		{
@@ -553,7 +558,7 @@ void loop()
 
 		//First print coarse measurement
 		int8_t convert2Microsec = payloadTime.bin2usCoarse;
-	
+		
 		Serial.print(F("time= "));
 		Serial.print(timer0_millis);
 		Serial.print(F(" finalCoarse= "));
