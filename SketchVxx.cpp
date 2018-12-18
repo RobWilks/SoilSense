@@ -20,6 +20,7 @@ v8 distribute soil probe measurements uniformly
 improve the estimate of measurement time
 */
 
+#include <Arduino.h>
 #include <OneWire.h>
 // use RadioHead to transmit messages
 // with a simple ASK transmitter
@@ -45,13 +46,12 @@ improve the estimate of measurement time
 volatile uint8_t count;
 
 const int interruptPin = 3;
-const int pinPowerCounter = 5;
-const int pinPower1 = 6;
-const int pinPower2 = 7;
+const int pinPowerCounter = 10;
+const int pinPowerOsc = 9;
 const int pinLed = 13;
 const byte receive_pin = -1;
 const byte transmit_pin = 12;
-const byte digT_pin = 8;
+const byte digT_pin = 11;
 
 
 
@@ -60,8 +60,6 @@ const uint8_t clockFrequency = 4; // i.e. 2^4 in MHz
 uint8_t preScalerSelect[2] = {6, 1}; // i.e. first pass divide by 256 : second by 1
 const uint8_t nCount = 8; // number to average is 2^nCount
 
-int pinPower = pinPower1;
-bool measureOsc1 = true; // first measurement is for osc1
 bool coarse = true; // first measurement is coarse; next fine
 bool initialized = true; // when false can use for debug/learn
 // store results here
@@ -90,7 +88,7 @@ const byte nVcc = 6; // ADC reads to determine Vcc; power of 2
 
 extern volatile unsigned long timer0_millis;
 const uint32_t periodStatusReport = 600000L;
-uint32_t periodOscReport = 30000L; // changed to check effect of polarisation
+const uint32_t periodOscReport = 240000L;
 uint32_t nextStatusReport = 0L;
 uint32_t nextOscReport = 0L;
 uint32_t now = 0L; // beginning of time
@@ -155,8 +153,7 @@ void setup()
 
 
 	pinMode(interruptPin, INPUT);
-	pinMode(pinPower1, OUTPUT);
-	pinMode(pinPower2, OUTPUT);
+	pinMode(pinPowerOsc, OUTPUT);
 	pinMode(pinPowerCounter, OUTPUT);
 	pinMode(pinLed, OUTPUT);
 
@@ -446,7 +443,7 @@ void loop()
 		
 		// loop through coarse then fine measurement
 		uint8_t j = (byte)coarse; // a global state variable seemed more elegant than a global index variable;
-		digitalWrite(pinPower, HIGH); // power-up oscillator
+		digitalWrite(pinPowerOsc, HIGH); // power-up oscillator
 		digitalWrite(pinPowerCounter, HIGH); // power-up counter board
 		
 		LowPower.powerDown(SLEEP_2S, ADC_OFF, BOD_OFF); // allow oscillator to stabilise before measuring frequency
@@ -485,7 +482,7 @@ void loop()
 		sleep_disable();
 		sei();
 		EIMSK = 0x00;  // disable all external interrupts
-		digitalWrite(pinPower, LOW); // power-down oscillator
+		digitalWrite(pinPowerOsc, LOW); // power-down oscillator
 		digitalWrite(pinPowerCounter, LOW); // power-down counter board
 
 
@@ -578,7 +575,7 @@ void loop()
 			// assemble packet
 			// with the original measurements and the positions of the binary point to convert them to microsec
 			// 14 bytes in packet
-			payloadTime.nodeId = (node | ((byte)measureOsc1 << 4)); // bit 5
+			payloadTime.nodeId = node;
 			payloadTime.varCoarse = variationResults[0];
 			payloadTime.varFine = variationResults[1];
 			payloadTime.coarseTime = meanResults[0];
@@ -592,14 +589,6 @@ void loop()
 
 
 			
-			// switch pins ready for next measurement
-			measureOsc1 = !measureOsc1;
-			pinPower = (measureOsc1 ? pinPower1 : pinPower2);
-			if (measureOsc1)
-			{
-				periodOscReport += 30000L;
-				if (periodOscReport > 240000L) periodOscReport = 30000L;
-			}
 		}
 		coarse = !coarse; // alternate coarse and fine
 	} // end measureOsc
