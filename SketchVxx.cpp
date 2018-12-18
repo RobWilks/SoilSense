@@ -133,7 +133,7 @@ PayloadItem2 payloadStatus;
 //////////////////////////////////Initialise the ISR///////////////////////////////////////
 
 ISR(TIMER2_OVF_vect) //Timer2's counter has overflowed
- {
+{
 	INC_COUNT();
 }
 
@@ -166,6 +166,9 @@ void setup()
 
 	// turn-off the ADC
 	ADCSRA &= ~(1 << ADEN);
+	
+	// turn-off timer1
+	TIMSK1 = 0;
 
 	//set-up timer2 to "normal" operation mode.  See datasheet pg. 147, 155, & 157-158 (incl. Table 18-8).
 	//-This is important so that the timer2 counter, TCNT2, counts only UP and not also down.
@@ -175,7 +178,7 @@ void setup()
 	TCCR2A &= 0b11111100; //set WGM21 & WGM20 to 0 (see datasheet pg. 155).
 	TCCR2B &= 0b11110111; //set WGM22 to 0 (see pg. 158).
 	// no overflow to enable longer period in powersave
-			setPrescaler(preScalerSelect);
+	setPrescaler(preScalerSelect);
 
 	
 	// Initialise the IO
@@ -457,130 +460,123 @@ void loop()
 		// To do:  check whether can shorten sleep to reduce power consumption
 
 
-		uint32_t maxCounts = ( 1 << nCount ); // keep as powers of 2
+		uint16_t maxCounts = ( 1 << nCount ); // keep as powers of 2
 		uint32_t result = 0L;
 		overFlowCount = 0;
+		byte mask = (1 << PORTB1);
+		byte state = PORTB & mask;
 		
 		
-		
-	TIMSK2 |= _BV(TOIE2);
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
 
-		for (uint32_t i = 0; i < maxCounts; i++)
+		
+		
+		while((PORTB & mask) == state) {;;} // wait for transition
+		TCNT2 = 0; //reset Timer2 counter
+		TIMSK2 |= (1 << TOIE2);  // enable overflow interrupt
+		TIMSK0 = 0; // turn off timer0 for lower jitter.  Note disables millis()
+		// assume that timer1 is not enabled
+		
+		
+		for (uint16_t i = 0; i < maxCounts; i++)
 		{
-			cli();
-			sleep_enable();
-			TCNT2 = 0; //reset Timer2 counter.  Not necessary?
-			sei();
-			sleep_cpu();
-			//LowPower.powerSave(SLEEP_FOREVER, ADC_OFF, BOD_ON, TIMER2_ON);
-			uint8_t oldCount = count;
-			sei();
-			sleep_cpu();
-			//LowPower.powerSave(SLEEP_FOREVER, ADC_OFF, BOD_ON, TIMER2_ON);
-			uint8_t newCount = count;
-			// store result
-			uint8_t delta = newCount - oldCount;
-			sumX += delta;
-			sumX2 += delta * delta;
+			while((PORTB & mask) != state) {;;} // wait for transition
+			while((PORTB & mask) == state) {;;} // wait for transition
 		}
-		sleep_disable();
+		cli();
+		byte count = TCNT2;
+		result = overFlowCount;
+		if( TIFR2 & (1 << TOV2)); //grab the timer2 overflow flag value; see datasheet pg. 160
+		{
+			result++; //force the overflow count to increment
+			TIFR2 |= (1 << TOV2);	// the flag is cleared by writing a logical one to it
+		}
+		TIMSK2 &= ~(1 << TOIE2);  // mask overflow interrupt
 		sei();
-		EIMSK = 0x00;  // disable all external interrupts
+		TIMSK0 = 1; // turn timer0 back on
+		result = result << 8;
+		result &= count;
+		
+		
+
 		digitalWrite(pinPower, LOW); // power-down oscillator
 		digitalWrite(pinPowerCounter, LOW); // power-down counter board
 
 
-		// Calculate mean and variation
+		/*
+		locate the binary point for the count:  8 + nCount bits in total; the binary point is to the right of the nCount bit
+		with enumeration of bits 0, 1, 2, 3 . . .
+		*/
 		
-		result = sumX; // Store mean * n
+		//to convert to microsec: divide count by clockFrequency; divide by nCount; multiply by prescaler
+		payloadTime.bin2usCoarse = clockFrequency +  nCount - preScaler[preScalerSelect];
+		payloadTime.bin2usFine = 0;
+		
+		uint32_t time2Measure = result << (preScaler[preScalerSelect] - clockFrequency);// approximate estimate in usec
+		timer0_millis += roundDiv(time2Measure , 1000L);
+
+		#if USE_SER
+
+		//print result
+		Serial.begin(115200);
+		delay(1000); // no need for sleep to save power since running serial
+		
+		for (uint8_t i = 0; i < 2; i++)
+		{
+			Serial.print(F("Variation= "));
+			Serial.print(variationResults[i]);
+			Serial.print(F(" "));
+		}
+		
+		/*
+		Converting binary fractions to decimal ones
+		power of 10 determines number of decimal places
+		n decimal ~ m binary * log10(2)
+		divide number of binary places by 3 to find power of 10
+		*/
+
+		//First print coarse measurement
+		int8_t convert2Microsec = payloadTime.bin2usCoarse;
+		
+		Serial.print(F("time= "));
+		Serial.print(timer0_millis);
+		Serial.print(F(" finalCoarse= "));
+		Serial.print(result >> convert2Microsec);
+		Serial.print(F("."));
+		Serial.print(((result & ((1L << convert2Microsec) - 1L)) * 100) >> convert2Microsec);
+		Serial.flush();
+		Serial.end();
 		
 		
-			
-			/*
-			locate the binary point for the count:  8 + nCount bits in total; the binary point is to the right of the nCount bit
-			with enumeration of bits 0, 1, 2, 3 . . .
-			*/
-			
-			//to convert to microsec: divide count by clockFrequency; divide by nCount; multiply by prescaler
-			payloadTime.bin2usCoarse = clockFrequency +  nCount - preScaler[preScalerSelect[0]];
-			payloadTime.bin2usFine = clockFrequency +  nCount - preScaler[preScalerSelect[1]];
-			
-			uint32_t time2Measure = result << (preScaler[preScalerSelect] - clockFrequency + 1);// approximate estimate in usec; +1 since omit alternate cycles
-			timer0_millis += roundDiv(time2Measure , 1000L);
-
-			#if USE_SER
-
-			//print result
-			Serial.begin(115200);
-			delay(1000); // no need for sleep to save power since running serial
-			
-			for (uint8_t i = 0; i < 2; i++)
-			{
-				Serial.print(F("Variation= "));
-				Serial.print(variationResults[i]);
-				Serial.print(F(" "));
-			}
-			
-			/*
-			Converting binary fractions to decimal ones
-			power of 10 determines number of decimal places
-			n decimal ~ m binary * log10(2)
-			divide number of binary places by 3 to find power of 10
-			*/
-
-			//First print coarse measurement
-			int8_t convert2Microsec = payloadTime.bin2usCoarse;
-			
-			Serial.print(F("time= "));
-			Serial.print(timer0_millis);
-			Serial.print(F(" finalCoarse= "));
-			Serial.print(result >> convert2Microsec);
-			Serial.print(F("."));
-			Serial.print(((result & ((1L << convert2Microsec) - 1L)) * 100) >> convert2Microsec);
-			Serial.flush();
-			Serial.end();
-			
-			
-			
-			
-			#endif // USE_SER
-			
-			
-			// assemble packet
-			// with the original measurements and the positions of the binary point to convert them to microsec
-			// 14 bytes in packet
-			payloadTime.nodeId = (node | ((byte)measureOsc1 << 4)); // bit 5
-			payloadTime.varCoarse = 0;
-			payloadTime.varFine = 0;
-			payloadTime.coarseTime = result;
-			payloadTime.fineTime = 0;
-			sendTimePacket();
-			
-			
+		
+		
+		#endif // USE_SER
+		
+		
+		// assemble packet
+		// with the original measurements and the positions of the binary point to convert them to microsec
+		// 14 bytes in packet
+		payloadTime.nodeId = (node | ((byte)measureOsc1 << 4)); // bit 5
+		payloadTime.varCoarse = 0;
+		payloadTime.varFine = 0;
+		payloadTime.coarseTime = result;
+		payloadTime.fineTime = 0;
+		sendTimePacket();
+		
+		
 
 
 
 
 
-			
-			// switch pins ready for next measurement
-			measureOsc1 = !measureOsc1;
-			pinPower = (measureOsc1 ? pinPower1 : pinPower2);
-			if (measureOsc1)
-			{
-				periodOscReport += 30000L;
-				if (periodOscReport > 240000L) periodOscReport = 30000L;
-			}
+		
+		// switch pins ready for next measurement
+		measureOsc1 = !measureOsc1;
+		pinPower = (measureOsc1 ? pinPower1 : pinPower2);
+		if (measureOsc1)
+		{
+			periodOscReport += 30000L;
+			if (periodOscReport > 240000L) periodOscReport = 30000L;
+		}
 	} // end measureOsc
 	
 } // end loop()
