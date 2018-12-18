@@ -35,7 +35,8 @@ v1 use overrun interrupt on timer2 rather than a low frequency clock
 #include <avr/sleep.h>
 #include <avr/pgmspace.h>
 
-#define GET_COUNT() count = TCNT2
+#define INC_OVERFLOW_COUNTER() count += 1
+#define INC_COUNTER() overFlowCount += 1
 #define USE_SER 0
 
 
@@ -43,11 +44,9 @@ v1 use overrun interrupt on timer2 rather than a low frequency clock
 
 
 
-//Note: an object of this class was already pre-instantiated in the .cpp file of this library, so you can simply access its methods (functions)
-//      directly now through the object name "timer2"
-//eRCaGuy_Timer2_Counter timer2;  //this is what the pre-instantiation line from the .cpp file looks like
 
-volatile uint8_t count;
+volatile uint16_t count;
+volatile uint32_t overFlowCount;
 
 const int interruptPin = 3;
 const int pinPowerCounter = 5;
@@ -67,7 +66,6 @@ const uint8_t nCount = 8; // number to average is 2^nCount
 
 int pinPower = pinPower1;
 bool measureOsc1 = true; // first measurement is for osc1
-bool coarse = true; // first measurement is coarse; next fine
 bool initialized = true; // when false can use for debug/learn
 // store results here
 uint32_t meanResults[2];
@@ -95,7 +93,7 @@ const byte nVcc = 6; // ADC reads to determine Vcc; power of 2
 
 extern volatile unsigned long timer0_millis;
 const uint32_t periodStatusReport = 600000L;
-uint32_t periodOscReport = 30000L; // changed to check effect of polarisation
+const uint32_t periodOscReport = 30000L;
 uint32_t nextStatusReport = 0L;
 uint32_t nextOscReport = 0L;
 uint32_t now = 0L; // beginning of time
@@ -134,10 +132,16 @@ typedef struct {
 PayloadItem2 payloadStatus;
 
 
-//////////////////////////////////Initialise the ISR///////////////////////////////////////
+//////////////////////////////////Initialise the ISR for INT1///////////////////////////////////////
 
 ISR(INT1_vect) {
-	GET_COUNT();
+	INC_COUNTER();
+}
+
+//////////////////////////////////Initialise the ISR for TIMER2 OVERFLOW///////////////////////////////////////
+
+ISR(TIMER2_OVF_vect) {
+	INC_OVERFLOW_COUNTER();
 }
 
 //////////////////////////////////flashLED///////////////////////////////////////
@@ -177,8 +181,7 @@ void setup()
 	//-To do this we must make WGM22, WGM21, & WGM20, within TCCR2A & TCCR2B, all have values of 0.
 	TCCR2A &= 0b11111100; //set WGM21 & WGM20 to 0 (see datasheet pg. 155).
 	TCCR2B &= 0b11110111; //set WGM22 to 0 (see pg. 158).
-	// no overflow to enable longer period in powersave
-	TIMSK2 &= ~(_BV(TOIE2));
+	TIMSK2 &= ~(_BV(TOIE2)); // no overflow
 	
 	// Initialise the IO
 	if (!driver.init())
@@ -450,7 +453,6 @@ void loop()
 		// start measuring using power save
 		
 		// loop through coarse then fine measurement
-		uint8_t j = (byte)coarse; // a global state variable seemed more elegant than a global index variable;
 		digitalWrite(pinPower, HIGH); // power-up oscillator
 		digitalWrite(pinPowerCounter, HIGH); // power-up counter board
 		
@@ -460,35 +462,67 @@ void loop()
 
 		set_sleep_mode(SLEEP_MODE_PWR_SAVE); // sleep while timer2 counts
 
-		setPrescaler(preScalerSelect[j]);
-		// enable INT1 interrupt on change
-		EICRA = 0x0c;  // INT1 – rising edge on SCL
-		EIMSK = 0x02;  // enable only int1
+		setPrescaler(preScalerSelect[0]); // To do: no longer need array here; move to setup()
 
 		uint32_t sumX = 0;
 		uint32_t sumX2 = 0;
-		uint32_t maxCounts = ( 1 << nCount ); // keep as powers of 2
+		uint16_t maxCounts = ( 1 << nCount ); // keep as powers of 2
+		overFlowCount = 0; // zero overrun counter
+		TIMSK2 &= ~(_BV(TOIE2)); // no overflow
+		cli();
+		// enable INT1 interrupt on change; To do: move to setup()
+		EICRA = 0x0c;  // INT1 – rising edge on SCL
+		EIMSK = 0x02;  // enable only int1
+		count = 0xffff;  // trigger on zero
+		sei();
+		while (count != 0) {;;} // wait until first rising edge
+		TCNT2 = 0; // zero timer 2 counter
+		TIMSK2 |= _BV(TOIE2); // interrupt on overflow
+		while (count < maxCounts) {;;} // maxCounts rising edges
+			cli();
+		TIMSK2 &= ~(_BV(TOIE2)); // no interrupt on overflow
+			boolean flag_save = TIFR2 | 0x1; //grab the timer2 overflow flag value; see datasheet pg. 160
+			_errorWatch = false;
+			if (flag_save) { //if the overflow flag is set
+				tcnt2_save = TCNT2; //update variable just saved since the overflow flag could have just tripped between previously saving the TCNT2 value and reading bit 0 of TIFR2.
+				//If this is the case, TCNT2 might have just changed from 255 to 0, and so we need to grab the new value of TCNT2 to prevent an error of up
+				//to 127.5us in any time obtained using the T2 counter (ex: T2_micros). (Note: 255 counts / 2 counts/us = 127.5us)
+				//Note: this line of code DID in fact fix the error just described, in which I periodically saw an error of ~127.5us in some values read in
+				//by some PWM read code I wrote.
+				_overflow_count++; //force the overflow count to increment
+				_errorWatch = true;
+				TIFR2 |= 0b00000001; //reset Timer2 overflow flag since we just manually incremented above; see datasheet pg. 160; this prevents execution of Timer2's overflow ISR
+			}
+		sumX = (overFlowCount << 8) | TCNT2;
+		
+			
 
+		
+		
+		
+		/*
 		for (uint32_t i = 0; i < maxCounts; i++)
 		{
-			cli();
-			sleep_enable();
-			TCNT2 = 0; //reset Timer2 counter.  Not necessary?
-			sei();
-			sleep_cpu();
-			//LowPower.powerSave(SLEEP_FOREVER, ADC_OFF, BOD_ON, TIMER2_ON);
-			uint8_t oldCount = count;
-			sei();
-			sleep_cpu();
-			//LowPower.powerSave(SLEEP_FOREVER, ADC_OFF, BOD_ON, TIMER2_ON);
-			uint8_t newCount = count;
-			// store result
-			uint8_t delta = newCount - oldCount;
-			sumX += delta;
-			sumX2 += delta * delta;
+		cli();
+		sleep_enable();
+		TCNT2 = 0; //reset Timer2 counter.  Not necessary?
+		sei();
+		sleep_cpu();
+		//LowPower.powerSave(SLEEP_FOREVER, ADC_OFF, BOD_ON, TIMER2_ON);
+		uint8_t oldCount = count;
+		sei();
+		sleep_cpu();
+		//LowPower.powerSave(SLEEP_FOREVER, ADC_OFF, BOD_ON, TIMER2_ON);
+		uint8_t newCount = count;
+		// store result
+		uint8_t delta = newCount - oldCount;
+		sumX += delta;
+		sumX2 += delta * delta;
 		}
 		sleep_disable();
 		sei();
+		*/
+
 		EIMSK = 0x00;  // disable all external interrupts
 		digitalWrite(pinPower, LOW); // power-down oscillator
 		digitalWrite(pinPowerCounter, LOW); // power-down counter board
@@ -600,11 +634,6 @@ void loop()
 			// switch pins ready for next measurement
 			measureOsc1 = !measureOsc1;
 			pinPower = (measureOsc1 ? pinPower1 : pinPower2);
-			if (measureOsc1)
-			{
-				periodOscReport += 30000L;
-				if (periodOscReport > 240000L) periodOscReport = 30000L;
-			}
 		}
 		coarse = !coarse; // alternate coarse and fine
 	} // end measureOsc
