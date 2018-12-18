@@ -20,7 +20,6 @@ v8 distribute soil probe measurements uniformly
 improve the estimate of measurement time
 */
 
-#include <Arduino.h>
 #include <OneWire.h>
 // use RadioHead to transmit messages
 // with a simple ASK transmitter
@@ -91,7 +90,7 @@ const byte nVcc = 6; // ADC reads to determine Vcc; power of 2
 
 extern volatile unsigned long timer0_millis;
 const uint32_t periodStatusReport = 600000L;
-const uint32_t periodOscReport = 240000L;
+uint32_t periodOscReport = 30000L; // changed to check effect of polarisation
 uint32_t nextStatusReport = 0L;
 uint32_t nextOscReport = 0L;
 uint32_t now = 0L; // beginning of time
@@ -579,7 +578,7 @@ void loop()
 			// assemble packet
 			// with the original measurements and the positions of the binary point to convert them to microsec
 			// 14 bytes in packet
-			payloadTime.nodeId = (node | (measureOsc1 << 4)); // bit 5
+			payloadTime.nodeId = (node | ((byte)measureOsc1 << 4)); // bit 5
 			payloadTime.varCoarse = variationResults[0];
 			payloadTime.varFine = variationResults[1];
 			payloadTime.coarseTime = meanResults[0];
@@ -596,6 +595,11 @@ void loop()
 			// switch pins ready for next measurement
 			measureOsc1 = !measureOsc1;
 			pinPower = (measureOsc1 ? pinPower1 : pinPower2);
+			if (measureOsc1)
+			{
+				periodOscReport += 30000L;
+				if (periodOscReport > 240000L) periodOscReport = 30000L;
+			}
 		}
 		coarse = !coarse; // alternate coarse and fine
 	} // end measureOsc
