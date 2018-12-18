@@ -65,6 +65,10 @@ int pinPower = pinPower1;
 bool measureOsc1 = true; // first measurement is for osc1
 bool coarse = true; // first measurement is coarse; next fine
 bool initialized = true; // when false can use for debug/learn
+// store results here
+uint32_t meanResults[2];
+uint32_t variationResults[2];
+
 
 
 const int baud = 500;
@@ -87,7 +91,7 @@ const byte nVcc = 6; // ADC reads to determine Vcc; power of 2
 
 extern volatile unsigned long timer0_millis;
 const uint32_t periodStatusReport = 600000L;
-const uint32_t periodOscReport = 120000L;
+const uint32_t periodOscReport = 240000L;
 uint32_t nextStatusReport = 0L;
 uint32_t nextOscReport = 0L;
 uint32_t now = 0L; // beginning of time
@@ -426,7 +430,7 @@ void sendStatus()
 void loop()
 {
 	LowPower.powerDown(SLEEP_8S, ADC_OFF, BOD_OFF); // wait to measure next port
-	timer0_millis += 8000;
+	timer0_millis += 8000L;
 	now = timer0_millis;
 	if (now > nextStatusReport)
 	{
@@ -441,17 +445,13 @@ void loop()
 
 		// start measuring using power save
 		
-		// store results here
-		uint32_t meanResults[2];
-		uint32_t variationResults[2];
-		
 		// loop through coarse then fine measurement
 		uint8_t j = (byte)coarse; // a global state variable seemed more elegant than a global index variable;
 		digitalWrite(pinPower, HIGH); // power-up oscillator
 		digitalWrite(pinPowerCounter, HIGH); // power-up counter board
 		
 		LowPower.powerDown(SLEEP_2S, ADC_OFF, BOD_OFF); // allow oscillator to stabilise before measuring frequency
-		timer0_millis += 2000;
+		timer0_millis += 2000L;
 		// To do:  check whether can shorten sleep to reduce power consumption
 
 		set_sleep_mode(SLEEP_MODE_PWR_SAVE); // sleep while timer2 counts
