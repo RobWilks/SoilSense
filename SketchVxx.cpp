@@ -66,7 +66,7 @@ const uint8_t nCount = 8; // number to average is 2^nCount
 
 int pinPower = pinPower1;
 bool measureOsc1 = true; // first measurement is for osc1
-bool initialized = true; // when false can use for debug/learn
+bool initialized = false; // when false can use for debug/learn
 // store results here
 uint32_t meanResults;
 
@@ -92,7 +92,7 @@ const byte nVcc = 6; // ADC reads to determine Vcc; power of 2
 
 extern volatile unsigned long timer0_millis;
 const uint32_t periodStatusReport = 600000L;
-uint32_t periodOscReport = 60000L; // changed to check effect of polarisation
+uint32_t periodOscReport = 10000L; // changed to check effect of polarisation
 uint32_t nextStatusReport = periodStatusReport;
 uint32_t nextOscReport = periodOscReport;
 uint32_t now = 0L; // beginning of time
@@ -141,8 +141,20 @@ ISR(TIMER2_OVF_vect) //Timer2's counter has overflowed
 //////////////////////////////////advanceTimer0///////////////////////////////////////
 void advanceTimer0(uint32_t deltaTime)
 {
+	uint8_t oldSREG = SREG;
+
+	// disable interrupts while we read timer0_millis or we might get an
+	// inconsistent value (e.g. in the middle of a write to timer0_millis)
+	cli();
+	timer0_millis += deltaTime;
+	SREG = oldSREG;
+}
+
+//////////////////////////////////advanceTimer///////////////////////////////////////
+void advanceTimer(uint32_t deltaTime)
+{
 	extern volatile unsigned long timer0_millis;
-	ATOMIC_BLOCK(ATOMIC_FORCEON)
+	ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
 	{
 		timer0_millis += deltaTime;
 	}
@@ -379,7 +391,7 @@ void setup()
 	ADCSRA &= ~(1 << ADEN);
 	
 	// turn-off timer1
-	TIMSK1 = 0;
+	//TIMSK1 = 0;
 
 	//set-up timer2 to "normal" operation mode.  See datasheet pg. 147, 155, & 157-158 (incl. Table 18-8).
 	//-This is important so that the timer2 counter, TCNT2, counts only UP and not also down.
@@ -415,28 +427,13 @@ void setup()
 
 	//print result
 	Serial.begin(115200);
-	delay(1000);
+	delay(1);
 	if (!initialized)
 	{
-		int a = 20;
-		int b = 7;
-		Serial.print("20/7 = ");
-		Serial.println(roundDiv(a,b));
-		b = -7;
-		Serial.print("20/-7 = ");
-		Serial.println(roundDiv(a,b));
-		a = -20;
-		Serial.print("-20/-7 = ");
-		Serial.println(roundDiv(a,b));
-		uint32_t c = 385;
-		Serial.print("385/256 with bitDiv = ");
-		Serial.println(bitDiv(c,8));
-		int32_t d = 0x7fffffff;
-		Serial.print("0x7fffffff/256 with bitDiv = ");
-		Serial.println(bitDiv(d,8));
+		Serial.println("Initialised");
+		initialized = true;
 		Serial.flush();
 		Serial.end();
-		initialized = true;
 	}
 	#endif
 
@@ -446,7 +443,7 @@ void setup()
 void loop()
 {
 	LowPower.powerDown(SLEEP_8S, ADC_OFF, BOD_OFF); // wait to measure next port
-		advanceTimer0(8000L);
+	advanceTimer0(8000L);
 	now = millis();
 	if (now > nextStatusReport)
 	{
@@ -469,18 +466,13 @@ void loop()
 		advanceTimer0(2000L);
 		// To do:  check whether can shorten sleep to reduce power consumption
 
-
 		uint16_t maxCounts = ( 1 << nCount ); // keep as powers of 2
 		uint32_t result = 0L;
 		overFlowCount = 0;
-		byte mask = (1 << PORTB1);
-		byte state = PORTB & mask;
+		byte mask = (1 << PIND3);
+		byte state = PIND & mask;
 		
-		
-
-		
-		
-		while((PORTB & mask) == state) {;;} // wait for transition
+		while((PIND & mask) == state) {;;} // wait for transition
 		TCNT2 = 0; //reset Timer2 counter
 		TIMSK2 |= (1 << TOIE2);  // enable overflow interrupt
 		TIMSK0 = 0; // turn off timer0 for lower jitter.  Note disables millis()
@@ -489,8 +481,8 @@ void loop()
 		
 		for (uint16_t i = 0; i < maxCounts; i++)
 		{
-			while((PORTB & mask) != state) {;;} // wait for transition
-			while((PORTB & mask) == state) {;;} // wait for transition
+			while((PIND & mask) != state) {;;} // wait for transition
+			while((PIND & mask) == state) {;;} // wait for transition
 		}
 		cli();
 		byte count = TCNT2;
@@ -504,7 +496,7 @@ void loop()
 		sei();
 		TIMSK0 = 1; // turn timer0 back on
 		result = result << 8;
-		result &= count;
+		result |= count;
 		
 		
 
@@ -537,7 +529,6 @@ void loop()
 		divide number of binary places by 3 to find power of 10
 		*/
 
-		//First print coarse measurement
 		int8_t convert2Microsec = payloadTime.bin2usCoarse;
 		
 		Serial.print(F("time= "));
@@ -545,12 +536,9 @@ void loop()
 		Serial.print(F(" finalCoarse= "));
 		Serial.print(result >> convert2Microsec);
 		Serial.print(F("."));
-		Serial.print(((result & ((1L << convert2Microsec) - 1L)) * 100) >> convert2Microsec);
+		Serial.println(((result & ((1L << convert2Microsec) - 1L)) * 100) >> convert2Microsec);
 		Serial.flush();
 		Serial.end();
-		
-		
-		
 		
 		#endif // USE_SER
 		
