@@ -32,9 +32,10 @@ replaces INT1 with direct monitoring of D3
 #include <LowPower.h>
 #include <avr/sleep.h>
 #include <avr/pgmspace.h>
+#include <util/atomic.h>
 
 #define INC_COUNT() overFlowCount += 1
-#define USE_SER 0
+#define USE_SER 1
 
 
 
@@ -91,9 +92,9 @@ const byte nVcc = 6; // ADC reads to determine Vcc; power of 2
 
 extern volatile unsigned long timer0_millis;
 const uint32_t periodStatusReport = 600000L;
-uint32_t periodOscReport = 30000L; // changed to check effect of polarisation
-uint32_t nextStatusReport = 0L;
-uint32_t nextOscReport = 0L;
+uint32_t periodOscReport = 60000L; // changed to check effect of polarisation
+uint32_t nextStatusReport = periodStatusReport;
+uint32_t nextOscReport = periodOscReport;
 uint32_t now = 0L; // beginning of time
 
 
@@ -137,6 +138,17 @@ ISR(TIMER2_OVF_vect) //Timer2's counter has overflowed
 	INC_COUNT();
 }
 
+//////////////////////////////////advanceTimer0///////////////////////////////////////
+void advanceTimer0(uint32_t deltaTime)
+{
+	extern volatile unsigned long timer0_millis;
+	ATOMIC_BLOCK(ATOMIC_FORCEON)
+	{
+		timer0_millis += deltaTime;
+	}
+	
+}
+
 //////////////////////////////////flashLED///////////////////////////////////////
 void flashLED(byte nTimes)
 {
@@ -147,87 +159,6 @@ void flashLED(byte nTimes)
 		LowPower.powerDown(SLEEP_500MS, ADC_OFF, BOD_OFF);
 		digitalWrite(pinLed, LOW);
 	}
-
-}
-
-//////////////////////////////////setup///////////////////////////////////////
-
-void setup()
-{
-
-
-	pinMode(interruptPin, INPUT);
-	pinMode(pinPower1, OUTPUT);
-	pinMode(pinPower2, OUTPUT);
-	pinMode(pinPowerCounter, OUTPUT);
-	pinMode(pinLed, OUTPUT);
-
-	
-
-	// turn-off the ADC
-	ADCSRA &= ~(1 << ADEN);
-	
-	// turn-off timer1
-	TIMSK1 = 0;
-
-	//set-up timer2 to "normal" operation mode.  See datasheet pg. 147, 155, & 157-158 (incl. Table 18-8).
-	//-This is important so that the timer2 counter, TCNT2, counts only UP and not also down.
-	//Note:  this messes up PWM outputs on pins 3 & 11, as well as
-	//interferes with the tone() library (http://arduino.cc/en/reference/tone)
-	//-To do this we must make WGM22, WGM21, & WGM20, within TCCR2A & TCCR2B, all have values of 0.
-	TCCR2A &= 0b11111100; //set WGM21 & WGM20 to 0 (see datasheet pg. 155).
-	TCCR2B &= 0b11110111; //set WGM22 to 0 (see pg. 158).
-	// no overflow to enable longer period in powersave
-	setPrescaler(preScalerSelect);
-
-	
-	// Initialise the IO
-	if (!driver.init())
-	{
-		
-		flashLED(10);
-		while (true) {
-			;; // do nothing forever
-		}
-	}
-
-
-	payloadTime.count = 0;
-	payloadTime.nodeId = node;
-	payloadStatus.count = 0;
-	payloadStatus.nodeId = node | 0x20; // bit 5 set to indicate status packet
-	payloadStatus.empty = 0L;
-
-	flashLED(3);
-	
-	#if USE_SER
-
-	//print result
-	Serial.begin(115200);
-	delay(1000);
-	if (!initialized)
-	{
-		int a = 20;
-		int b = 7;
-		Serial.print("20/7 = ");
-		Serial.println(roundDiv(a,b));
-		b = -7;
-		Serial.print("20/-7 = ");
-		Serial.println(roundDiv(a,b));
-		a = -20;
-		Serial.print("-20/-7 = ");
-		Serial.println(roundDiv(a,b));
-		uint32_t c = 385;
-		Serial.print("385/256 with bitDiv = ");
-		Serial.println(bitDiv(c,8));
-		int32_t d = 0x7fffffff;
-		Serial.print("0x7fffffff/256 with bitDiv = ");
-		Serial.println(bitDiv(d,8));
-		Serial.flush();
-		Serial.end();
-		initialized = true;
-	}
-	#endif
 
 }
 //////////////////////////////////sendTimePacket///////////////////////////////////////
@@ -321,7 +252,7 @@ uint32_t readADC( byte channel, byte noSamples )
 		sumX += adcVal;
 	}
 	
-	timer0_millis += 27; // (8 x number of measurements x 13 + 12) / 1000 + time for settling
+	advanceTimer0(27); // (8 x number of measurements x 13 + 12) / 1000 + time for settling
 	TIMSK0 = 1; // turn timer0 back on
 	// turn-off the ADC
 	ADCSRA &= ~(1 << ADEN);
@@ -373,7 +304,7 @@ int16_t measureTemp()
 		ds.skip();
 		ds.write(0x44, 1);        // start conversion, with parasite power on at the end
 		LowPower.powerDown(SLEEP_1S, ADC_OFF, BOD_OFF);     // maybe 750ms is enough, maybe not
-		timer0_millis += 1000;
+		advanceTimer0(1000L);
 		// we might do a ds.depower() here, but the reset will take care of it.
 		ds.reset();
 		ds.skip();
@@ -430,13 +361,93 @@ void sendStatus()
 }
 
 
+//////////////////////////////////setup///////////////////////////////////////
+
+void setup()
+{
+
+
+	pinMode(interruptPin, INPUT);
+	pinMode(pinPower1, OUTPUT);
+	pinMode(pinPower2, OUTPUT);
+	pinMode(pinPowerCounter, OUTPUT);
+	pinMode(pinLed, OUTPUT);
+
+	
+
+	// turn-off the ADC
+	ADCSRA &= ~(1 << ADEN);
+	
+	// turn-off timer1
+	TIMSK1 = 0;
+
+	//set-up timer2 to "normal" operation mode.  See datasheet pg. 147, 155, & 157-158 (incl. Table 18-8).
+	//-This is important so that the timer2 counter, TCNT2, counts only UP and not also down.
+	//Note:  this messes up PWM outputs on pins 3 & 11, as well as
+	//interferes with the tone() library (http://arduino.cc/en/reference/tone)
+	//-To do this we must make WGM22, WGM21, & WGM20, within TCCR2A & TCCR2B, all have values of 0.
+	TCCR2A &= 0b11111100; //set WGM21 & WGM20 to 0 (see datasheet pg. 155).
+	TCCR2B &= 0b11110111; //set WGM22 to 0 (see pg. 158).
+	// no overflow to enable longer period in powersave
+	setPrescaler(preScalerSelect);
+
+	
+	// Initialise the IO
+	if (!driver.init())
+	{
+		
+		flashLED(10);
+		while (true) {
+			;; // do nothing forever
+		}
+	}
+
+
+	payloadTime.count = 0;
+	payloadTime.nodeId = node;
+	payloadStatus.count = 0;
+	payloadStatus.nodeId = node | 0x20; // bit 5 set to indicate status packet
+	payloadStatus.empty = 0L;
+
+	flashLED(3);
+	
+	#if USE_SER
+
+	//print result
+	Serial.begin(115200);
+	delay(1000);
+	if (!initialized)
+	{
+		int a = 20;
+		int b = 7;
+		Serial.print("20/7 = ");
+		Serial.println(roundDiv(a,b));
+		b = -7;
+		Serial.print("20/-7 = ");
+		Serial.println(roundDiv(a,b));
+		a = -20;
+		Serial.print("-20/-7 = ");
+		Serial.println(roundDiv(a,b));
+		uint32_t c = 385;
+		Serial.print("385/256 with bitDiv = ");
+		Serial.println(bitDiv(c,8));
+		int32_t d = 0x7fffffff;
+		Serial.print("0x7fffffff/256 with bitDiv = ");
+		Serial.println(bitDiv(d,8));
+		Serial.flush();
+		Serial.end();
+		initialized = true;
+	}
+	#endif
+
+}
 
 //////////////////////////////////loop///////////////////////////////////////
 void loop()
 {
 	LowPower.powerDown(SLEEP_8S, ADC_OFF, BOD_OFF); // wait to measure next port
-	timer0_millis += 8000L;
-	now = timer0_millis;
+		advanceTimer0(8000L);
+	now = millis();
 	if (now > nextStatusReport)
 	{
 		nextStatusReport = now + periodStatusReport;
@@ -445,18 +456,17 @@ void loop()
 	if (now > nextOscReport)
 	{
 		// measure osc
-		nextOscReport = now + (periodOscReport >> 1); // divide by 2 since report on alternate cycles so as to reduce polarisation
+		nextOscReport = now + periodOscReport;
 
 
 		// start measuring using power save
 		
-		// loop through coarse then fine measurement
-		uint8_t j = (byte)coarse; // a global state variable seemed more elegant than a global index variable;
 		digitalWrite(pinPower, HIGH); // power-up oscillator
 		digitalWrite(pinPowerCounter, HIGH); // power-up counter board
 		
 		LowPower.powerDown(SLEEP_2S, ADC_OFF, BOD_OFF); // allow oscillator to stabilise before measuring frequency
-		timer0_millis += 2000L;
+		
+		advanceTimer0(2000L);
 		// To do:  check whether can shorten sleep to reduce power consumption
 
 
@@ -512,20 +522,13 @@ void loop()
 		payloadTime.bin2usFine = 0;
 		
 		uint32_t time2Measure = result << (preScaler[preScalerSelect] - clockFrequency);// approximate estimate in usec
-		timer0_millis += roundDiv(time2Measure , 1000L);
+		advanceTimer0(roundDiv(time2Measure , 1000L));
 
 		#if USE_SER
 
 		//print result
 		Serial.begin(115200);
-		delay(1000); // no need for sleep to save power since running serial
-		
-		for (uint8_t i = 0; i < 2; i++)
-		{
-			Serial.print(F("Variation= "));
-			Serial.print(variationResults[i]);
-			Serial.print(F(" "));
-		}
+		delay(1); // no need for sleep to save power since running serial
 		
 		/*
 		Converting binary fractions to decimal ones
@@ -538,7 +541,7 @@ void loop()
 		int8_t convert2Microsec = payloadTime.bin2usCoarse;
 		
 		Serial.print(F("time= "));
-		Serial.print(timer0_millis);
+		Serial.print(millis());
 		Serial.print(F(" finalCoarse= "));
 		Serial.print(result >> convert2Microsec);
 		Serial.print(F("."));
@@ -572,11 +575,6 @@ void loop()
 		// switch pins ready for next measurement
 		measureOsc1 = !measureOsc1;
 		pinPower = (measureOsc1 ? pinPower1 : pinPower2);
-		if (measureOsc1)
-		{
-			periodOscReport += 30000L;
-			if (periodOscReport > 240000L) periodOscReport = 30000L;
-		}
 	} // end measureOsc
 	
 } // end loop()
