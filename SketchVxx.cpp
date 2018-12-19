@@ -48,10 +48,10 @@ replaces INT1 with direct monitoring of D3
 
 volatile uint32_t overFlowCount;
 
-const int interruptPin = 3;
+const int pinOutputCounter = 3;
 const int pinPowerCounter = 5;
-const int pinPower1 = 6;
-const int pinPower2 = 7;
+const int pinPowerOsc1 = 6;
+const int pinPowerOsc2 = 7;
 const int pinLed = 13;
 const byte receive_pin = -1;
 const byte transmit_pin = 12;
@@ -64,7 +64,7 @@ const uint8_t clockFrequency = 4; // i.e. 2^4 in MHz
 uint8_t preScalerSelect = 1; // i.e.divide by 1
 const uint8_t nCount = 8; // number to average is 2^nCount
 
-int pinPower = pinPower1;
+int pinPower = pinPowerOsc1;
 bool measureOsc1 = true; // first measurement is for osc1
 bool initialized = false; // when false can use for debug/learn
 // store results here
@@ -91,8 +91,8 @@ RH_ASK driver(baud, receive_pin, transmit_pin);//speed, Rx pin, Tx pin
 const byte nVcc = 6; // ADC reads to determine Vcc; power of 2
 
 extern volatile unsigned long timer0_millis;
-const uint32_t periodStatusReport = 600000L;
-uint32_t periodOscReport = 10000L; // changed to check effect of polarisation
+const uint32_t periodStatusReport = 60000L;
+uint32_t periodOscReport = 5000L; // changed to check effect of polarisation
 uint32_t nextStatusReport = periodStatusReport;
 uint32_t nextOscReport = periodOscReport;
 uint32_t now = 0L; // beginning of time
@@ -167,9 +167,11 @@ void flashLED(byte nTimes)
 	for (uint8_t i = 0; i < nTimes; i++)
 	{
 		LowPower.powerDown(SLEEP_500MS, ADC_OFF, BOD_OFF);
-		digitalWrite(pinLed, HIGH);
+		//digitalWrite(pinLed, HIGH);
+		PORTB ^= (1 << PB5);
 		LowPower.powerDown(SLEEP_500MS, ADC_OFF, BOD_OFF);
-		digitalWrite(pinLed, LOW);
+		//digitalWrite(pinLed, LOW);
+		PORTB ^= (1 << PB5);
 	}
 
 }
@@ -263,11 +265,12 @@ uint32_t readADC( byte channel, byte noSamples )
 		uint32_t adcVal = ADCL | (ADCH << 8);
 		sumX += adcVal;
 	}
-	
-	advanceTimer0(27); // (8 x number of measurements x 13 + 12) / 1000 + time for settling
 	TIMSK0 = 1; // turn timer0 back on
-	// turn-off the ADC
-	ADCSRA &= ~(1 << ADEN);
+	ADCSRA &= ~(1 << ADEN);// turn-off the ADC
+	uint32_t noCycles = (3 << (noSamples - 1)) * 13L + 12L; //prescale factor x (number of measurements x 13.5 + 12)
+	noCycles *= (1 << (ADCSRA & 0x07)); // multiply by prescaler 
+	uint32_t missedTime = roundDiv((noCycles >> 4) , 1000L) + 20L;// divide by clock frequency; convert to msec; add time for settling
+	advanceTimer(missedTime); 
 
 	// Return the conversion result
 	return sumX;
@@ -316,7 +319,7 @@ int16_t measureTemp()
 		ds.skip();
 		ds.write(0x44, 1);        // start conversion, with parasite power on at the end
 		LowPower.powerDown(SLEEP_1S, ADC_OFF, BOD_OFF);     // maybe 750ms is enough, maybe not
-		advanceTimer0(1000L);
+		advanceTimer(1000L);
 		// we might do a ds.depower() here, but the reset will take care of it.
 		ds.reset();
 		ds.skip();
@@ -359,12 +362,12 @@ void sendStatus()
 	sendStatusPacket();
 	#if USE_SER
 	Serial.begin(115200);
-	delay(1000);
+	delay(1);
 	Serial.print(F("temp= "));
 	Serial.print(payloadStatus.temp);
 	Serial.print(F(" Vcc= "));
 	Serial.print(payloadStatus.Vcc);
-	Serial.print(F(" millissec= "));
+	Serial.print(F(" millisec= "));
 	Serial.println(payloadStatus.millisec);
 	Serial.flush();
 	Serial.end();
@@ -379,19 +382,34 @@ void setup()
 {
 
 
-	pinMode(interruptPin, INPUT);
-	pinMode(pinPower1, OUTPUT);
-	pinMode(pinPower2, OUTPUT);
-	pinMode(pinPowerCounter, OUTPUT);
-	pinMode(pinLed, OUTPUT);
+	//pinMode(pinOutputCounter, INPUT);
+	//pinMode(pinPowerOsc1, OUTPUT);
+	//pinMode(pinPowerOsc2, OUTPUT);
+	//pinMode(pinPowerCounter, OUTPUT);
+	//pinMode(pinLed, OUTPUT);
+	DDRB &= 0b11110000; // pins 8, 9, 10 and 11 inputs
+	PORTB = 0b00001111; // pull-up pins 8 to 11
+	DDRB |= (1 << DDB5); // pin13 output
+	DDRD &= 0b11100011;  // pin 2, 3, 4 inputs
+	PORTD = 0b00010100; // pull-up pins 2 and 4
+	DDRD |= ((1 << DDD5) | (1 << DDD6) | (1 << DDD7)); //pins 5, 6 and 7 outputs
 
-	
+/*
+const int pinOutputCounter = 3;
+const int pinPowerCounter = 5;
+const int pinPowerOsc1 = 6;
+const int pinPowerOsc2 = 7;
+const int pinLed = 13;
+const byte receive_pin = -1;
+const byte transmit_pin = 12;
+const byte digT_pin = 8;
+*/	
 
 	// turn-off the ADC
 	ADCSRA &= ~(1 << ADEN);
 	
 	// turn-off timer1
-	//TIMSK1 = 0;
+	TIMSK1 = 0;
 
 	//set-up timer2 to "normal" operation mode.  See datasheet pg. 147, 155, & 157-158 (incl. Table 18-8).
 	//-This is important so that the timer2 counter, TCNT2, counts only UP and not also down.
@@ -443,7 +461,7 @@ void setup()
 void loop()
 {
 	LowPower.powerDown(SLEEP_8S, ADC_OFF, BOD_OFF); // wait to measure next port
-	advanceTimer0(8000L);
+	advanceTimer(8000L);
 	now = millis();
 	if (now > nextStatusReport)
 	{
@@ -463,7 +481,7 @@ void loop()
 		
 		LowPower.powerDown(SLEEP_2S, ADC_OFF, BOD_OFF); // allow oscillator to stabilise before measuring frequency
 		
-		advanceTimer0(2000L);
+		advanceTimer(2000L);
 		// To do:  check whether can shorten sleep to reduce power consumption
 
 		uint16_t maxCounts = ( 1 << nCount ); // keep as powers of 2
@@ -514,7 +532,7 @@ void loop()
 		payloadTime.bin2usFine = 0;
 		
 		uint32_t time2Measure = result << (preScaler[preScalerSelect] - clockFrequency);// approximate estimate in usec
-		advanceTimer0(roundDiv(time2Measure , 1000L));
+		advanceTimer(roundDiv(time2Measure , 1000L));
 
 		#if USE_SER
 
@@ -562,7 +580,7 @@ void loop()
 		
 		// switch pins ready for next measurement
 		measureOsc1 = !measureOsc1;
-		pinPower = (measureOsc1 ? pinPower1 : pinPower2);
+		pinPower = (measureOsc1 ? pinPowerOsc1 : pinPowerOsc2);
 	} // end measureOsc
 	
 } // end loop()
