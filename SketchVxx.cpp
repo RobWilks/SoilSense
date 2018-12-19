@@ -35,7 +35,7 @@ replaces INT1 with direct monitoring of D3
 #include <util/atomic.h>
 
 #define INC_COUNT() overFlowCount += 1
-#define USE_SER 1
+#define USE_SER 0
 
 
 
@@ -91,8 +91,8 @@ RH_ASK driver(baud, receive_pin, transmit_pin);//speed, Rx pin, Tx pin
 const byte nVcc = 6; // ADC reads to determine Vcc; power of 2
 
 extern volatile unsigned long timer0_millis;
-const uint32_t periodStatusReport = 60000L;
-uint32_t periodOscReport = 5000L; // changed to check effect of polarisation
+const uint32_t periodStatusReport = 600000L;
+uint32_t periodOscReport = 120000L; // changed to check effect of polarisation
 uint32_t nextStatusReport = periodStatusReport;
 uint32_t nextOscReport = periodOscReport;
 uint32_t now = 0L; // beginning of time
@@ -268,9 +268,9 @@ uint32_t readADC( byte channel, byte noSamples )
 	TIMSK0 = 1; // turn timer0 back on
 	ADCSRA &= ~(1 << ADEN);// turn-off the ADC
 	uint32_t noCycles = (3 << (noSamples - 1)) * 13L + 12L; //prescale factor x (number of measurements x 13.5 + 12)
-	noCycles *= (1 << (ADCSRA & 0x07)); // multiply by prescaler 
+	noCycles *= (1 << (ADCSRA & 0x07)); // multiply by prescaler
 	uint32_t missedTime = roundDiv((noCycles >> 4) , 1000L) + 20L;// divide by clock frequency; convert to msec; add time for settling
-	advanceTimer(missedTime); 
+	advanceTimer(missedTime);
 
 	// Return the conversion result
 	return sumX;
@@ -394,16 +394,16 @@ void setup()
 	PORTD = 0b00010100; // pull-up pins 2 and 4
 	DDRD |= ((1 << DDD5) | (1 << DDD6) | (1 << DDD7)); //pins 5, 6 and 7 outputs
 
-/*
-const int pinOutputCounter = 3;
-const int pinPowerCounter = 5;
-const int pinPowerOsc1 = 6;
-const int pinPowerOsc2 = 7;
-const int pinLed = 13;
-const byte receive_pin = -1;
-const byte transmit_pin = 12;
-const byte digT_pin = 8;
-*/	
+	/*
+	const int pinOutputCounter = 3;
+	const int pinPowerCounter = 5;
+	const int pinPowerOsc1 = 6;
+	const int pinPowerOsc2 = 7;
+	const int pinLed = 13;
+	const byte receive_pin = -1;
+	const byte transmit_pin = 12;
+	const byte digT_pin = 8;
+	*/
 
 	// turn-off the ADC
 	ADCSRA &= ~(1 << ADEN);
@@ -476,8 +476,9 @@ void loop()
 
 		// start measuring using power save
 		
-		digitalWrite(pinPower, HIGH); // power-up oscillator
-		digitalWrite(pinPowerCounter, HIGH); // power-up counter board
+		//digitalWrite(pinPower, HIGH); // power-up oscillator
+		//digitalWrite(pinPowerCounter, HIGH); // power-up counter board
+		PORTD ^= ((1 << DDD5) | (1 << pinPower));
 		
 		LowPower.powerDown(SLEEP_2S, ADC_OFF, BOD_OFF); // allow oscillator to stabilise before measuring frequency
 		
@@ -518,9 +519,9 @@ void loop()
 		
 		
 
-		digitalWrite(pinPower, LOW); // power-down oscillator
-		digitalWrite(pinPowerCounter, LOW); // power-down counter board
-
+		//digitalWrite(pinPower, LOW); // power-down oscillator
+		//digitalWrite(pinPowerCounter, LOW); // power-down counter board
+		PORTD ^= ((1 << DDD5) | (1 << pinPower));
 
 		/*
 		locate the binary point for the count:  8 + nCount bits in total; the binary point is to the right of the nCount bit
@@ -547,14 +548,13 @@ void loop()
 		divide number of binary places by 3 to find power of 10
 		*/
 
-		int8_t convert2Microsec = payloadTime.bin2usCoarse;
 		
 		Serial.print(F("time= "));
 		Serial.print(millis());
 		Serial.print(F(" finalCoarse= "));
-		Serial.print(result >> convert2Microsec);
+		Serial.print(result >> payloadTime.bin2usCoarse);
 		Serial.print(F("."));
-		Serial.println(((result & ((1L << convert2Microsec) - 1L)) * 100) >> convert2Microsec);
+		Serial.println(((result & ((1L << payloadTime.bin2usCoarse) - 1L)) * 100) >> payloadTime.bin2usCoarse);
 		Serial.flush();
 		Serial.end();
 		
