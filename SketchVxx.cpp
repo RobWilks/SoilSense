@@ -7,20 +7,10 @@
 /*
 
 
-v3 working with Uno and Promini.  Mirror file on AtmelStudio
-v4 with inclusion of OneWire to read DS18b20 digital thermometer
-project soilSensev6 has a stable method to measure frequency
-the first result is obtained by combining two measurements at different timer2 clock frequencies
-the second result is obtained only from the measurement at the lowest frequency
-the MC is in powersave during the measurement
-measurement is started and terminated on the rising edge of the signal to INT1 (pin3)
-there is a problem with the variation calculation for large values of nCount
-v7 change timing of measurement loop to reduce polarisation
-v8 distribute soil probe measurements uniformly
-improve the estimate of measurement time
-
+forked from sketchV10
 adds overrun interrupt for TIMER2
 replaces INT1 with direct monitoring of D3
+v2 modified for pin out of MC1648 board 
 */
 
 #include <OneWire.h>
@@ -48,14 +38,15 @@ replaces INT1 with direct monitoring of D3
 
 volatile uint32_t overFlowCount;
 
-const int pinOutputCounter = 3;
-const int pinPowerCounter = 5;
-const int pinPowerOsc1 = 6;
-const int pinPowerOsc2 = 7;
-const int pinLed = 13;
+/*
+pinOutputCounter = 3;
+pinPowerCounter = 10;
+pinPowerOsc = 9;
+pinLed = 13;
+*/
 const byte receive_pin = -1;
 const byte transmit_pin = 12;
-const byte digT_pin = 8;
+const byte digT_pin = 11;
 
 
 
@@ -64,8 +55,6 @@ const uint8_t clockFrequency = 4; // i.e. 2^4 in MHz
 uint8_t preScalerSelect = 1; // i.e.divide by 1
 const uint8_t nCount = 8; // number to average is 2^nCount
 
-int pinPower = pinPowerOsc1;
-bool measureOsc1 = true; // first measurement is for osc1
 bool initialized = false; // when false can use for debug/learn
 // store results here
 uint32_t meanResults;
@@ -92,7 +81,7 @@ const byte nVcc = 6; // ADC reads to determine Vcc; power of 2
 
 extern volatile unsigned long timer0_millis;
 const uint32_t periodStatusReport = 600000L;
-uint32_t periodOscReport = 120000L; // changed to check effect of polarisation
+const uint32_t periodOscReport = 120000L; // changed to check effect of polarisation
 uint32_t nextStatusReport = periodStatusReport;
 uint32_t nextOscReport = periodOscReport;
 uint32_t now = 0L; // beginning of time
@@ -382,24 +371,21 @@ void setup()
 {
 
 
-	//pinMode(pinOutputCounter, INPUT);
-	//pinMode(pinPowerOsc1, OUTPUT);
-	//pinMode(pinPowerOsc2, OUTPUT);
-	//pinMode(pinPowerCounter, OUTPUT);
-	//pinMode(pinLed, OUTPUT);
-	DDRB &= 0b11110000; // pins 8, 9, 10 and 11 inputs
-	PORTB = 0b00001111; // pull-up pins 8 to 11
-	DDRB |= (1 << DDB5); // pin13 output
-	DDRD &= 0b11100011;  // pin 2, 3, 4 inputs
-	PORTD = 0b00010100; // pull-up pins 2 and 4
-	DDRD |= ((1 << DDD5) | (1 << DDD6) | (1 << DDD7)); //pins 5, 6 and 7 outputs
+	
+	// PORTB maps pins 8 to 13 of Pro Mini
+	// PORTD maps Rxd, Txd ,2, 3, 4, 5, 6, 7 of Pro Mini
+	
+	DDRB &= 0b11110110; // pins 8 and 11 inputs
+	PORTB = 0b00001001; // pull-up pins 8 and 11
+	DDRB |= (1 << DDB1) | (1 << DDB2) | (1 << DDB5); // pins 9, 10, 13 outputs
+	DDRD &= 0b00000011;  // pins 2, 3, 4, 5, 6, 7 inputs
+	PORTD = 0b11110100; // pull-up all pins except Rxd, Txd, 3
 
 	/*
-	const int pinOutputCounter = 3;
-	const int pinPowerCounter = 5;
-	const int pinPowerOsc1 = 6;
-	const int pinPowerOsc2 = 7;
-	const int pinLed = 13;
+	pinOutputCounter = 3;
+	pinPowerCounter = 10;
+	pinPowerOsc = 9;
+	pinLed = 13;
 	const byte receive_pin = -1;
 	const byte transmit_pin = 12;
 	const byte digT_pin = 8;
@@ -476,9 +462,9 @@ void loop()
 
 		// start measuring using power save
 		
-		//digitalWrite(pinPower, HIGH); // power-up oscillator
-		//digitalWrite(pinPowerCounter, HIGH); // power-up counter board
-		PORTD ^= ((1 << DDD5) | (1 << pinPower));
+		// power-up oscillator
+		// power-up counter board
+		PORTB ^= ((1 << PORTB1) | (1 << PORTB2));
 		
 		LowPower.powerDown(SLEEP_2S, ADC_OFF, BOD_OFF); // allow oscillator to stabilise before measuring frequency
 		
@@ -519,9 +505,9 @@ void loop()
 		
 		
 
-		//digitalWrite(pinPower, LOW); // power-down oscillator
-		//digitalWrite(pinPowerCounter, LOW); // power-down counter board
-		PORTD ^= ((1 << DDD5) | (1 << pinPower));
+		// power-down oscillator
+		// power-down counter board
+		PORTB ^= ((1 << PORTB1) | (1 << PORTB2));
 
 		/*
 		locate the binary point for the count:  8 + nCount bits in total; the binary point is to the right of the nCount bit
@@ -564,7 +550,7 @@ void loop()
 		// assemble packet
 		// with the original measurements and the positions of the binary point to convert them to microsec
 		// 14 bytes in packet
-		payloadTime.nodeId = (node | ((byte)measureOsc1 << 4)); // bit 5
+		payloadTime.nodeId = (node | 0x10); // bit 5
 		payloadTime.varCoarse = 0;
 		payloadTime.varFine = 0;
 		payloadTime.coarseTime = result;
@@ -572,15 +558,6 @@ void loop()
 		sendTimePacket();
 		
 		
-
-
-
-
-
-		
-		// switch pins ready for next measurement
-		measureOsc1 = !measureOsc1;
-		pinPower = (measureOsc1 ? pinPowerOsc1 : pinPowerOsc2);
 	} // end measureOsc
 	
 } // end loop()
