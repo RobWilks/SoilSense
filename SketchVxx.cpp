@@ -1,112 +1,99 @@
 /*Begining of Auto generated code by Atmel studio */
 #include <Arduino.h>
-
 /*End of auto generated code by Atmel studio */
 
-//v4 added compiler switch to turn on logging to sdcard
-//v5 added close when stopLogging is set; begin and open when logging is resumed
-//added mod to SD.cpp
-//v6 added varCountTMP and varCountChipTemp to packet
-//initialise syncTime in setup()
-//track packet transmission% by node
-//change filename to SD_03_xx
-//packet tracking for all nodes
-//v7 created 19/11/18 to create logger on serial port; might not use this fork!
-//change #if defined to #if
-//added compiler switch for RT_CLOCK
-//fork to report data from SoilSense; separate monitor for TNode
-//modify packet structure
+
 
 /*
-if (root.isOpen()) root.close();  // <<<<<<<<<<<<<<<<<<  ADD THIS LINE
+
+
+forked from sketchV10
+adds overrun interrupt for TIMER2
+replaces INT1 with direct monitoring of D3
+v2 modified for pin out of MC1648 board
+wire pins 8 and 9 together to boost output current
+circuit uses direct power from ports which is not recommended practice!
 */
 
-#include <SD.h>
-#include <Wire.h>
-#include "RTClib.h"
+#include <OneWire.h>
+// use RadioHead to transmit messages
+// with a simple ASK transmitter
+// Implements a simplex (one-way) transmitter with an TX-C1 module
+
 #include <RH_ASK.h>
-#include <SPI.h> // Not actually used but needed to compile
-//Beginning of Auto generated function prototypes by Atmel Studio
-void logfilecomma();
-void Serialcomma();
-void error(byte error_no);
-void flushbuffer();
-//End of Auto generated function prototypes by Atmel Studio
+#include <LowPower.h>
+#include <avr/sleep.h>
+#include <avr/pgmspace.h>
+#include <util/atomic.h>
+
+#define INC_COUNT() overFlowCount += 1
+#define USE_SER 1
 
 
 
 
-// for the data logging shield, we use digital pin 10 for the SD cs line
-#define USE_SERIAL 1 // echo data to serial port
-#define LOG_TO_SDCARD 0 // log data received
-#define RT_CLOCK 0 // use of RTC
-#define MAX_NODE 16
-#define BUTTON 0
-// code to process time sync messages from the serial port   */
-#define TIME_MSG_LEN  11   // time sync to PC is HEADER followed by unix time_t as ten ascii digits
-#define TIME_HEADER  'T'   // Header tag for serial time sync message e.g. T1542831319
+
+
+//Note: an object of this class was already pre-instantiated in the .cpp file of this library, so you can simply access its methods (functions)
+//      directly now through the object name "timer2"
+//eRCaGuy_Timer2_Counter timer2;  //this is what the pre-instantiation line from the .cpp file looks like
+
+volatile uint32_t overFlowCount;
+
+/*
+pinOutputCounter = 3;
+pinPowerCounter = 10;
+pinPowerOsc = 9;
+pinLed = 13;
+*/
+const byte receive_pin = -1;
+const byte transmit_pin = 12;
+const byte digT_pin = 11;
 
 
 
-const uint32_t syncInterval = 180000; // mills between calls to flush() - to write data tao the card
-const int chipSelect = 10;
-const byte buttonPin = 5;
-const byte ledPin = 6;
-const byte rxPin = 7;
-const byte txPin = 8;
-const uint16_t baudRate = 500;
+uint8_t preScaler[8] = {0, 0, 3, 5, 6, 7, 8, 10}; // powers of 2
+const uint8_t clockFrequency = 4; // i.e. 2^4 in MHz
+uint8_t preScalerSelect = 1; // i.e.divide by 1
+const uint8_t nCount = 8; // number to average is 2^nCount
 
-// parameters to calculate %transmission
-const unsigned int packetCountMax = 16;
-unsigned int packetCount[MAX_NODE];
-uint32_t syncTime; // time of last sync()
-uint8_t startPacket[MAX_NODE];
-boolean stopLogging = false; // used for runtime remove of SD card
-boolean buttonState = true; // high unless button pressed; used for runtime remove of SD card
-boolean firstPacket[MAX_NODE]; // flag to initialise variables in main loop
+bool initialized = false; // when false can use for debug/learn
+// store results here
+uint32_t meanResults;
 
 
 
-#if RT_CLOCK
-RTC_DS1307 RTC; // define the Real Time Clock object
-#endif
-#if LOG_TO_SDCARD
-File logfile;  // the logging file
-char filename[] = "sd_05_00.CSV";
-#endif
+const int baud = 500;
+const byte node = 13;
 
-RH_ASK driver(baudRate, rxPin, txPin); //speed, Rx pin, Tx pin
+OneWire  ds(digT_pin);  // a 4.7K pull-up resistor is necessary
+// digital temperature sensor
+
+RH_ASK driver(baud, receive_pin, transmit_pin);//speed, Rx pin, Tx pin
 /// Constructor.
 /// At present only one instance of RH_ASK per sketch is supported.
 /// \param[in] speed The desired bit rate in bits per second
 /// \param[in] rxPin The pin that is used to get data from the receiver
 /// \param[in] txPin The pin that is used to send data to the transmitter
 /// \param[in] pttPin The pin that is connected to the transmitter controller. It will be set HIGH to enable the transmitter (unless pttInverted is true).
-/// \param[in] pttInverted true if you desire the pttin to be inverted so that LOW wil enable the transmitter.
+/// \param[in] pttInverted true if you desire the pttin to be inverted so that LOW will enable the transmitter.
 
-///////////////////////////////////struct PayloadItem//////////////////////////////////////
 
+const byte nVcc = 6; // ADC reads to determine Vcc; power of 2
+
+extern volatile unsigned long timer0_millis;
+const uint32_t periodStatusReport = 60000L;
+const uint32_t periodOscReport = 20000L; // changed to check effect of polarisation
+uint32_t nextStatusReport = periodStatusReport;
+uint32_t nextOscReport = periodOscReport;
+uint32_t now = 0L; // beginning of time
+
+
+uint32_t roundDiv(uint32_t a, uint32_t b);
+uint32_t bitDiv(uint32_t a, byte b);
+
+////////////////////////////////////struct PayloadItem/////////////////////////////////////
 typedef struct {
-	byte nodeId;
-	byte count;
-	unsigned long RCtime;
-	int tmp; // could be negative
-	int chipTemp; // could be negative
-	unsigned int Vbatt;
-	byte varCountTMP;
-	byte varCountChipTemp;
-} PayloadItem;
-PayloadItem payloadTemp;
-// structure for temp nodes
-// could compress packet for final version since tmp requires 9 bits and Vbatt 14
-// use the node byte to carry a flag for movement in bit 7
-// RC time is approximate since using only watchdog timer
-// count keeps track of the # packets sent out
-// user data 14 bytes; require RH_ASK_MAX_PAYLOAD_LEN > user data + 7
-
-////////////////////////////////////struct PayloadItem1/////////////////////////////////////
-typedef struct PayloadItem1
-{
 	byte nodeId; //store this nodeId
 	byte count;
 	byte bin2usCoarse;
@@ -115,537 +102,463 @@ typedef struct PayloadItem1
 	byte varFine;
 	unsigned long coarseTime;
 	unsigned long fineTime;
-};
+} PayloadItem;
 // count keeps track of the # packets sent out
 
-PayloadItem1 payloadTime;
+PayloadItem payloadTime;
 
 
 ////////////////////////////////////struct PayloadItem2/////////////////////////////////////
-typedef struct PayloadItem2
-{
+typedef struct {
 	byte nodeId; //store this nodeId
 	byte count;
 	int temp;
 	int Vcc;
 	unsigned long millisec;
 	unsigned long empty;
-};
-// millisec time is approximate since  using only watchdog timer
+} PayloadItem2;
+// time is approximate since  using only watchdog timer
 
 PayloadItem2 payloadStatus;
 
 
+//////////////////////////////////Initialise the ISR///////////////////////////////////////
 
-////////////////////////////////////logfilecomma/////////////////////////////////////
-void logfilecomma()
+ISR(TIMER2_OVF_vect) //Timer2's counter has overflowed
 {
-	#if LOG_TO_SDCARD
-	logfile.print(",");
-	#endif
-}
-/////////////////////////////////Serialcomma////////////////////////////////////////
-void Serialcomma()
-{
-	Serial.print(",");
-}
-/////////////////////////////////error////////////////////////////////////////
-
-
-void error(byte error_no)
-{
-	#if USE_SERIAL
-	Serial.print(F("error: "));
-	switch (error_no) {
-		case 1:
-		Serial.println(F("Card"));
-		break;
-		case 2:
-		Serial.println(F("File"));
-		break;
-		case 3:
-		Serial.println(F("RTC"));
-		break;
-		case 4:
-		Serial.println(F("RF"));
-		break;
-	}
-	#endif
-	// LED indicates error
-	digitalWrite(ledPin, HIGH);
-	while (1);
+	INC_COUNT();
 }
 
-///////////////////////////////////flushbuffer//////////////////////////////////////
-void flushbuffer()
-// only called once
+//////////////////////////////////advanceTimer0///////////////////////////////////////
+void advanceTimer0(uint32_t deltaTime)
 {
-	#if LOG_TO_SDCARD
+	uint8_t oldSREG = SREG;
 
-	// LED to show we are syncing data to the card & updating FAT!
-	digitalWrite(ledPin, HIGH);
-	cli(); // block all interrupts; unsure whether RF Rx can interrupt SPI comms
-	logfile.flush();
-	sei();
-	digitalWrite(ledPin, LOW);
-	#if USE_SERIAL
-	Serial.println(F("Flushed buffer"));
-	#endif
-
-	#endif
-
+	// disable interrupts while we read timer0_millis or we might get an
+	// inconsistent value (e.g. in the middle of a write to timer0_millis)
+	cli();
+	timer0_millis += deltaTime;
+	SREG = oldSREG;
 }
 
-
-
-///////////////////////////////////processSyncMessage//////////////////////////////////////
-uint32_t processSyncMessage()
+//////////////////////////////////advanceTimer///////////////////////////////////////
+void advanceTimer(uint32_t deltaTime)
 {
-	// return the time if a valid sync message is received on the serial port.
-	// time message consists of a header and ten ascii digits
-	while(Serial.available() < TIME_MSG_LEN) {;;}  //wait til 11 digits are available
+	extern volatile unsigned long timer0_millis;
+	ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
 	{
-		char c = Serial.read() ;
-		if( c == TIME_HEADER )
-		{
-			uint32_t unixTime = 0;
-			for(int i = 0; i < (TIME_MSG_LEN - 1); i++)
-			{
-				c = Serial.read();
-				if( c >= '0' && c <= '9')
-				{
-					unixTime = (10 * unixTime) + (c - '0') ; // convert digits to a number
-				}
-			}
-			return unixTime;
-		}
+		timer0_millis += deltaTime;
 	}
-	return 0;
-}
-///////////////////////////////////printHeaders//////////////////////////////////////
-
-// print headers for different packet types; more efficient as function
-// 0 for temperature node
-// 1 for frequency measurement
-void printHeader(int whichHeader)
-{
-	#if LOG_TO_SDCARD
-	logfile.print(F("millis,"));
-	#if RT_CLOCK
-	logfile.print(F("stamp,"));
-	#endif
-	logfile.print(F("node,count,"));
-	switch (whichHeader)
-	{
-		case 0:
-		logfile.println(F("RCtime,tmp,chipTemp,Vbatt,var1,var2"));
-		break;
-		case 1:
-		logfile.println(F("bin2usCoarse,bin2usFine,varCoarse,varFine,coarseTime,fineTime"));
-		break;
-	}
-	#endif
-
 	
-
-
-	#if USE_SERIAL
-	Serial.print(F("millis,"));
-	#if RT_CLOCK
-	Serial.print(F("stamp,"));
-	#endif
-	Serial.print(F("node,count,"));
-	switch (whichHeader)
-	{
-		case 0:
-		Serial.println(F("RCtime,tmp,chipTemp,Vbatt,var1,var2"));
-		break;
-		case 1:
-		Serial.println(F("bin2usCoarse,bin2usFine,varCoarse,varFine,coarseTime,fineTime"));
-		break;
-	}
-	#endif
 }
-///////////////////////////////////setup//////////////////////////////////////
 
-void setup() {
-	#if USE_SERIAL
-	Serial.begin(57600);
-	delay(1000);
-	#endif
-
-	// use debugging LED
-	pinMode(ledPin, OUTPUT);
-
-	#if RT_CLOCK
-	// connect to RTC
-	Wire.begin();
-	if (!RTC.begin())
+//////////////////////////////////flashLED///////////////////////////////////////
+void flashLED(byte nTimes)
+{
+	for (uint8_t i = 0; i < nTimes; i++)
 	{
-		error(3);
+		LowPower.powerDown(SLEEP_500MS, ADC_OFF, BOD_OFF);
+		//digitalWrite(pinLed, HIGH);
+		PORTB ^= (1 << PB5);
+		LowPower.powerDown(SLEEP_500MS, ADC_OFF, BOD_OFF);
+		//digitalWrite(pinLed, LOW);
+		PORTB ^= (1 << PB5);
 	}
-	#endif
+
+}
+//////////////////////////////////sendTimePacket///////////////////////////////////////
+
+void sendTimePacket()
+{
+	// send packet
+	driver.send((uint8_t*)(&payloadTime), sizeof(payloadTime));
+	driver.waitPacketSent();
+	++payloadTime.count;
+}
+//////////////////////////////////sendStatusPacket///////////////////////////////////////
+
+void sendStatusPacket()
+{
+	// send packet
+	driver.send((uint8_t*)(&payloadStatus), sizeof(payloadStatus));
+	driver.waitPacketSent();
+	++payloadStatus.count;
+}
+//////////////////////////////////setPrescaler///////////////////////////////////////
+void setPrescaler(byte value)
+{
+	// set prescaler for timer2
+	// Bit 2:0 – CS22:0: Clock Select.  The three Clock Select bits select the clock source to be used by the Timer/Counter
+	// off 0x0
+	// clkT2S/1 0x01
+	// clkT2S/8 0x02
+	// clkT2S/32 0x03
+	// clkT2S/64 0x04
+	// clkT2S/128 0x05
+	// clkT2S/256 0x06
+	// clkT2S/1024 0x07
+	// could develop an auto-ranging function
+	// see pg 156 Atmel-8271I-AVR- ATmega-Datasheet_10/2014
 	
-	#if USE_SERIAL
-	while (Serial.available()) {Serial.read();}
-	#if RT_CLOCK
-	Serial.println(F("Enter 11 char unix timestamp 'T1234567890'"));
-	while (!Serial.available()); // wait for data
-	uint32_t t = processSyncMessage();
-	if (t > 0)	RTC.adjust(DateTime(t));
-	// following line sets the RTC to the date & time this sketch was compiled
-	//rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-	// This line sets the RTC with an explicit date & time, for example to set
-	// Nov 21, 2018 at 190600 hhmmss you would call:
-	// rtc.adjust(DateTime(2014, 1, 21, 3, 0, 0));
-	DateTime now = RTC.now();
-	Serial.print(F("Time:  "));
-	Serial.print(now.year(), DEC);
-	Serial.print('/');
-	Serial.print(now.month(), DEC);
-	Serial.print('/');
-	Serial.print(now.day(), DEC);
-	Serial.print(' ');
-	Serial.print(now.hour(), DEC);
-	Serial.print(':');
-	Serial.print(now.minute(), DEC);
-	Serial.print(':');
-	Serial.print(now.second(), DEC);
-	Serial.println();
+	TCCR2B = TCCR2B & 0b11111000 | value;
+}
+/////////////////////////////////roundDiv//////////////////////////////////////////
+uint32_t roundDiv(uint32_t a, uint32_t b)
+// returns a/b rounded to the nearest integer
+{
+	uint32_t result =  ((a + (b >> 1)) / b);
+	return result;
+}
+
+/////////////////////////////////////bitDiv//////////////////////////////////////
+uint32_t bitDiv(uint32_t a, byte b)
+// returns a / 2^b rounded to the nearest integer
+{
+	uint32_t result = (a + (bit(b - 1))) >> b;
+	return result;
+}
+
+//////////////////////////////////readADC///////////////////////////////////////
+uint32_t readADC( byte channel, byte noSamples )
+{
+	
+	// http://forum.arduino.cc/index.php?topic=38119.0
+	// function uses 2 to the power of noSamples
+
+	TIMSK0 = 0; // turn off timer0 for lower jitter.  Note disables millis()
+
+	uint32_t sumX;
+	// ADC Enable and prescaler of 128
+	// 16000000/128 = 125000
+	/*
+	A normal conversion takes 13 ADC clock cycles. The first conversion after the ADC is switched on (ADEN in
+	ADCSRA is set) takes 25 ADC clock cycles in order to initialize the analog circuitry.
+	When the bandgap reference voltage is used as input to the ADC, it will take a certain time for the voltage to
+	stabilize. If not stabilized, the first value read after the first conversion may be wrong.
+	*/
+	ADCSRA = (1 << ADEN) | 0x07;
+	// Bits 2:0 – ADPS[2:0]: ADC Prescaler Select Bits
+	// These bits determine the division factor between the system clock frequency and the input clock to the ADC.
+	ADMUX = channel; // the last 3 bits of MUX define the analogue pin
+	// first 4 bits determine reference voltage
+	delayMicroseconds(20000); // Wait for voltage to settle
+	//dummy read
+	ADCSRA |= _BV(ADSC); // start the conversion
+	while (bit_is_set(ADCSRA, ADSC)); // ADSC is cleared when the conversion finishes
+	sumX = 0;
+	//  Generate an interrupt when the conversion is finished
+
+
+	for (uint16_t i = 0; i < bit(noSamples) ; i++)
+	{
+		ADCSRA |= _BV(ADSC); // Start conversion
+		while (bit_is_set(ADCSRA, ADSC)); // measuring
+		uint32_t adcVal = ADCL | (ADCH << 8);
+		sumX += adcVal;
+	}
+	TIMSK0 = 1; // turn timer0 back on
+	ADCSRA &= ~(1 << ADEN);// turn-off the ADC
+	uint32_t noCycles = (3 << (noSamples - 1)) * 13L + 12L; //prescale factor x (number of measurements x 13.5 + 12)
+	noCycles *= (1 << (ADCSRA & 0x07)); // multiply by prescaler
+	uint32_t missedTime = roundDiv((noCycles >> 4) , 1000L) + 20L;// divide by clock frequency; convert to msec; add time for settling
+	advanceTimer(missedTime);
+
+	// Return the conversion result
+	return sumX;
+}
+//////////////////////////////////measureVcc///////////////////////////////////////
+// From : http://provideyourown.com/2012/secret-arduino-voltmeter-measure-battery-voltage/
+uint32_t measureVcc()
+{
+	// Read 1.1V reference against AVcc
+	// set the reference to Vcc and the measurement to the internal 1.1V reference
+
+	// determine the ADC channel for the internal reference voltage
+	#if defined(__AVR_ATmega32U4__) || defined(__AVR_ATmega1280__) || defined(__AVR_ATmega2560__)
+	byte muxVal = _BV(REFS0) | _BV(MUX4) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
+	#elif defined (__AVR_ATtiny24__) || defined(__AVR_ATtiny44__) || defined(__AVR_ATtiny84__)
+	byte muxVal = _BV(MUX5) | _BV(MUX0);
+	#elif defined (__AVR_ATtiny25__) || defined(__AVR_ATtiny45__) || defined(__AVR_ATtiny85__)
+	byte muxVal = _BV(MUX3) | _BV(MUX2);
 	#else
-	Serial.println(F("Enter any char"));
-	while (!Serial.available());// wait to start
+	byte muxVal = _BV(REFS0) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
 	#endif
+
+
+	uint32_t result = (1 << nVcc) * 1173751L / readADC( muxVal, nVcc); // Calculate Vcc (in mV); estimated as intRef_Volts*1023*1000 = 1125300L
+	return result; // Vcc in millivolts
+	
+}
+
+
+//////////////////////////////////measureTemp///////////////////////////////////////
+int16_t measureTemp()
+{
+	byte addr[8];
+	int16_t tmp;
+
+	if (ds.reset()) // check device is present
+	{
+		ds.skip();
+		ds.write(0x44, 1);        // start conversion, with parasite power on at the end
+		LowPower.powerDown(SLEEP_1S, ADC_OFF, BOD_OFF);     // maybe 750ms is enough, maybe not
+		advanceTimer(1000L);
+		// we might do a ds.depower() here, but the reset will take care of it.
+		ds.reset();
+		ds.skip();
+		ds.write(0xBE);         // Read Scratchpad
+		tmp = ds.read();
+		tmp += (ds.read()<<8);
+
+		
+		//          for (uint8_t i = 0; i < 9; i++) // we need 9 bytes
+		//          {
+		//            data[i] = ds.read();
+		//          }
+		//          if (OneWire::crc8(data, 8) == data[8])
+		//          {
+		//            // Convert the data to actual temperature
+		//            // because the result is a 16 bit signed integer, it should
+		//            // be stored to an "int16_t" type, which is always 16 bits
+		//            // even when compiled on a 32 bit processor.
+		//            tmp = (data[1] << 8) | data[0];
+		//            byte cfg = (data[4] & 0x60);
+		//            // at lower res, the low bits are undefined, so let's zero them
+		//            if (cfg == 0x00) tmp = tmp & ~7;  // 9 bit resolution, 93.75 ms
+		//            else if (cfg == 0x20) tmp = tmp & ~3; // 10 bit res, 187.5 ms
+		//            else if (cfg == 0x40) tmp = tmp & ~1; // 11 bit res, 375 ms
+		//            // default is 12 bit resolution, 750 ms conversion time
+		//            //  celsius = (float)tmp / 16.0;
+		//            //  fahrenheit = celsius * 1.8 + 32.0;
+		//          }
+	} //if device present
+	return(tmp);
+}
+
+//////////////////////////////////sendStatus///////////////////////////////////////
+void sendStatus()
+{
+	//assemble packet
+	payloadStatus.temp = measureTemp();
+	payloadStatus.Vcc = measureVcc();
+	payloadStatus.millisec = now;
+	sendStatusPacket();
+	#if USE_SER
+	Serial.begin(115200);
+	delay(1);
+	Serial.print(F("temp= "));
+	Serial.print(payloadStatus.temp);
+	Serial.print(F(" Vcc= "));
+	Serial.print(payloadStatus.Vcc);
+	Serial.print(F(" millisec= "));
+	Serial.println(payloadStatus.millisec);
+	Serial.flush();
+	Serial.end();
 	#endif
+	
+}
+
+
+//////////////////////////////////setup///////////////////////////////////////
+
+void setup()
+{
+
 
 	
-	#if LOG_TO_SDCARD
-
-	// initialize the SD card
-	#if USE_SERIAL
-	Serial.print(F("Initializing SD card..."));
-	#endif
-	// make sure that the default chip select pin is set to
-	// output, even if you don't use it:
-	pinMode(chipSelect, OUTPUT);
-
-	// see if the card is present and can be initialized:
-	if (!SD.begin(chipSelect)) {
-		error(1);
-	}
-	#if USE_SERIAL
-	Serial.println(F("card initialized."));
-	#endif
-
-
-	// create a new file
-	for (uint8_t i = 0; i < 100; i++) {
-		filename[6] = i / 10 + '0';
-		filename[7] = i % 10 + '0';
-		if (! SD.exists(filename)) {
-			// only open a new file if it doesn't exist
-			logfile = SD.open(filename, FILE_WRITE);
-			break;  // leave the loop!
-		}
-	}
-
-	if (! logfile) {
-		error(2);
-	}
-	#if USE_SERIAL
-	Serial.print(F("Log-> "));
-	Serial.println(filename);
-	#endif
-	#endif // LOG_TO_SDCARD
+	// PORTB maps pins 8 to 13 of Pro Mini
+	// PORTD maps Rxd, Txd ,2, 3, 4, 5, 6, 7 of Pro Mini
 	
+	DDRB &= 0b11110111; // pin 11 input
+	PORTB = 0b00001000; // pull-up pin 11
+	DDRB |= (1 << DDB0) | (1 << DDB1) | (1 << DDB2) | (1 << DDB5); // pins 8, 9, 10, 13 outputs
+	DDRD &= 0b00000011;  // pins 2, 3, 4, 5, 6, 7 inputs
+	PORTD = 0b11110100; // pull-up all pins except Rxd, Txd, 3
+
+	/*
+	pinOutputCounter = 3;
+	pinPowerCounter = 10;
+	pinPowerOsc = 9;
+	pinLed = 13;
+	const byte receive_pin = -1;
+	const byte transmit_pin = 12;
+	const byte digT_pin = 8;
+	*/
+
+	// turn-off the ADC
+	ADCSRA &= ~(1 << ADEN);
 	
+	// turn-off timer1
+	TIMSK1 = 0;
+
+	//set-up timer2 to "normal" operation mode.  See datasheet pg. 147, 155, & 157-158 (incl. Table 18-8).
+	//-This is important so that the timer2 counter, TCNT2, counts only UP and not also down.
+	//Note:  this messes up PWM outputs on pins 3 & 11, as well as
+	//interferes with the tone() library (http://arduino.cc/en/reference/tone)
+	//-To do this we must make WGM22, WGM21, & WGM20, within TCCR2A & TCCR2B, all have values of 0.
+	TCCR2A &= 0b11111100; //set WGM21 & WGM20 to 0 (see datasheet pg. 155).
+	TCCR2B &= 0b11110111; //set WGM22 to 0 (see pg. 158).
+	// no overflow to enable longer period in powersave
+	setPrescaler(preScalerSelect);
+
 	
+	// Initialise the IO
 	if (!driver.init())
 	{
-		error(4);
+		
+		flashLED(10);
+		while (true) {
+			;; // do nothing forever
+		}
 	}
 
-	// print headers for different packet types
-	printHeader(0);
-	printHeader(1);
+
+	payloadTime.count = 0;
+	payloadTime.nodeId = node;
+	payloadStatus.count = 0;
+	payloadStatus.nodeId = node | 0x20; // bit 5 set to indicate status packet
+	payloadStatus.empty = 0L;
+
+	flashLED(7);
 	
+	#if USE_SER
 
-	syncTime = millis(); // time of last sync()
-
-	for (uint8_t i = 0; i < MAX_NODE; i++) firstPacket[i] = true;
-
-	// signal completed initialisation
-	for (uint8_t i = 0; i < 7; i++) {
-		digitalWrite(ledPin, HIGH);
-		delay(200);
-		digitalWrite(ledPin, LOW);
-		delay(200);
-	}
-}
-/////////////////////////////////loop////////////////////////////////////////
-
-void loop() {
-	uint8_t convert2Microsec;
-	
-	#if LOG_TO_SDCARD
-	#if BUTTON
-	if (buttonState && !digitalRead(buttonPin)) // check for button push NB debouncing hardwired
+	//print result
+	Serial.begin(115200);
+	delay(1);
+	if (!initialized)
 	{
-		buttonState = false;
-		stopLogging = !stopLogging;
-		if (stopLogging)
-		{
-			logfile.close();
-			#if USE_SERIAL
-			Serial.println(F("OK to remove SD card"));
-			#endif
-		}
-		else // start logging so initialise SD & open file
-		{
-			// see if the card is present and can be initialized:
-			if (!SD.begin(chipSelect)) {
-				error(1);
-			}
-			logfile = SD.open(filename, FILE_WRITE);
-			#if USE_SERIAL
-			Serial.println(F("Logging resumed"));
-			#endif
-		}
+		Serial.println("Initialised");
+		initialized = true;
+		Serial.flush();
+		Serial.end();
 	}
-	if (!buttonState && digitalRead(buttonPin)) buttonState = true; // check for button release
-	#endif
 	#endif
 
-	if (stopLogging == true) // when logging stopped only action is to flash LED; packets are ignored
-	{
-		digitalWrite(ledPin, HIGH);
-		delay(50);
-		digitalWrite(ledPin, LOW);
-		delay(250);
-	}
-	else
-	{
-		uint8_t buf[RH_ASK_MAX_MESSAGE_LEN];
-		uint8_t buflen = sizeof(buf);
-		if (driver.recv(buf, &buflen)) // Non-blocking
-		{
-			digitalWrite(ledPin, HIGH);
-			delay(250);
-			payloadTemp = *(PayloadItem*)buf;
-			payloadTime = *(PayloadItem1*)buf;
-			payloadStatus = *(PayloadItem2*)buf;  // temp, time and status packets have different structures
-			
-			byte node = payloadTemp.nodeId; // all packet structures start with node and count; the ID is the first nibble
-			byte nibble = node & 0x0f;
-			byte count = payloadTemp.count;
-			
-			// log milliseconds since starting
-			uint32_t m = millis();
-			// fetch the time
-			#if RT_CLOCK
-			DateTime now = RTC.now();
-			#endif
-			long packetsSent = 0; // the first value logged is indeterminate; only set on later logs
-
-			if (firstPacket[nibble]) // initialize %packet variables
-			{
-				firstPacket[nibble] = false;
-				packetCount[nibble] = 0;
-				startPacket[nibble] = count;
-			}
-			else
-			{
-				++packetCount[nibble];
-				// calculate the percentx10 transmission rate
-				if (packetCount[nibble] == packetCountMax)
-				{
-					packetsSent = (long)count - (long)startPacket[nibble];
-					if (packetsSent < 0) packetsSent = packetsSent + 256L; // check for wrap-round
-					packetsSent = 1000L * (long)packetCountMax / packetsSent; // convert to percentx10
-					packetCount[nibble] = 0;
-					startPacket[nibble] = count;
-				}
-			}
-
-			// First 6 bytes same for all packets
-			#if LOG_TO_SDCARD
-			logfile.print(m);         // milliseconds since start
-			logfilecomma();
-			#if RT_CLOCK
-			logfile.print(now.unixtime()); // seconds since 1/1/1970
-			logfilecomma();
-			#endif
-			logfile.print(node);
-			logfilecomma();
-			logfile.print(count);
-			logfilecomma();
-			#endif
-			
-			#if USE_SERIAL
-			Serial.print(m);         // milliseconds since start
-			Serialcomma();
-			#if RT_CLOCK
-			Serial.print(now.unixtime()); // seconds since 1/1/1970
-			Serialcomma();
-			#endif
-			Serial.print(node);
-			Serialcomma();
-			Serial.print(count);
-			Serialcomma();
-			#endif
-			
-			
-			if (nibble < 12) // nodes 1-11 are temperature nodes, nodes 12-15 for soil moisture
-			{
-				#if LOG_TO_SDCARD
-				logfile.print(payloadTemp.RCtime);
-				logfilecomma();
-				logfile.print(payloadTemp.tmp);
-				logfilecomma();
-				logfile.print(payloadTemp.chipTemp);
-				logfilecomma();
-				logfile.print(payloadTemp.Vbatt);
-				logfilecomma();
-				logfile.print(payloadTemp.varCountTMP);
-				logfilecomma();
-				logfile.print(payloadTemp.varCountChipTemp);
-				#endif
-				
-				#if USE_SERIAL
-				Serial.print(payloadTemp.RCtime);
-				Serialcomma();
-				Serial.print(payloadTemp.tmp);
-				Serialcomma();
-				Serial.print(payloadTemp.chipTemp);
-				Serialcomma();
-				Serial.print(payloadTemp.Vbatt);
-				Serialcomma();
-				Serial.print(payloadTemp.varCountTMP);
-				Serialcomma();
-				Serial.print(payloadTemp.varCountChipTemp);
-				#endif
-			}
-			
-			else
-			{
-				if (node & 0x20)
-				// Status packet for soilSense
-				{
-					#if LOG_TO_SDCARD
-					logfile.print(payloadStatus.temp);
-					logfilecomma();
-					logfile.print(payloadStatus.Vcc);
-					logfilecomma();
-					logfile.print(payloadStatus.millisec);
-					#endif
-					
-					#if USE_SERIAL
-					Serial.print(payloadStatus.temp);
-					Serialcomma();
-					Serial.print(payloadStatus.Vcc);
-					Serialcomma();
-					Serial.print(payloadStatus.millisec);
-					#endif
-				}
-				else
-				{
-					#if LOG_TO_SDCARD
-					logfile.print(payloadTime.bin2usCoarse);
-					logfilecomma();
-					logfile.print(payloadTime.bin2usFine);
-					logfilecomma();
-					logfile.print(payloadTime.varCoarse);
-					logfilecomma();
-					logfile.print(payloadTime.varFine);
-					logfilecomma();
-					
-					/*
-					Print coarse measurement
-					*/
-					uint8_t convert2Microsec = payloadTime.bin2usCoarse;
-					logfile.print(payloadTime.coarseTime >> convert2Microsec);
-					logfile.print(F("."));
-					logfile.print(((payloadTime.coarseTime & ((1L << convert2Microsec) - 1L)) * 100) >> convert2Microsec);
-					logfilecomma();
-					
-					/*
-					Now for the fine measurement
-					*/
-					convert2Microsec = payloadTime.bin2usFine;
-					
-					logfile.print(payloadTime.fineTime >> convert2Microsec);
-					logfile.print(F("."));
-					logfile.print(((payloadTime.fineTime & ((1L << convert2Microsec) - 1L)) * 10000) >> convert2Microsec);
-					#endif
-					
-					#if USE_SERIAL
-					Serial.print(payloadTime.bin2usCoarse);
-					Serialcomma();
-					Serial.print(payloadTime.bin2usFine);
-					Serialcomma();
-					Serial.print(payloadTime.varCoarse);
-					Serialcomma();
-					Serial.print(payloadTime.varFine);
-					Serialcomma();
-					
-					/*
-					Print coarse measurement
-					*/
-					convert2Microsec = payloadTime.bin2usCoarse;
-					Serial.print(payloadTime.coarseTime >> convert2Microsec);
-					Serial.print(F("."));
-					Serial.print(((payloadTime.coarseTime & ((1L << convert2Microsec) - 1L)) * 100) >> convert2Microsec);
-					Serialcomma();
-					
-					/*
-					Now for the fine measurement
-					*/
-					convert2Microsec = payloadTime.bin2usFine;
-					
-					Serial.print(payloadTime.fineTime >> convert2Microsec);
-					Serial.print(F("."));
-					Serial.print(((payloadTime.fineTime & ((1L << convert2Microsec) - 1L)) * 10000) >> convert2Microsec);
-					#endif
-				}
-			}
-			
-			// Log stats for receipt of packets
-			#if LOG_TO_SDCARD
-			if (packetCount[nibble] == 0)
-			{
-				logfilecomma();
-				logfile.println(packetsSent);
-			}
-			else
-			{
-				logfile.println();
-			}
-			#endif
-			
-			#if USE_SERIAL
-			if (!packetCount[nibble] == 0)
-			{
-				Serialcomma();
-				Serial.println(packetsSent);
-			}
-			else
-			{
-				Serial.println();
-			}
-			#endif
-			
-			digitalWrite(ledPin, LOW);
-		}
-
-		// Now we write data to disk! Don't sync too often - requires 2048 bytes of I/O to SD card
-		// which uses a bunch of power and takes time
-		#if LOG_TO_SDCARD
-		uint32_t m = millis();
-		if ((m - syncTime) > syncInterval)
-		{
-			flushbuffer();
-			syncTime = m;
-		}
-		#endif
-	}
 }
+
+//////////////////////////////////loop///////////////////////////////////////
+void loop()
+{
+	LowPower.powerDown(SLEEP_8S, ADC_OFF, BOD_OFF); // wait to measure next port
+	advanceTimer(8000L);
+	now = millis();
+	if (now > nextStatusReport)
+	{
+		nextStatusReport = now + periodStatusReport;
+		sendStatus();
+	}
+	if (now > nextOscReport)
+	{
+		// measure osc
+		nextOscReport = now + periodOscReport;
+
+
+		// start measuring using power save
+		
+		// power-up oscillator
+		// power-up counter board
+		PORTB ^= ((1 << PORTB0) | (1 << PORTB1) | (1 << PORTB2) | (1 << PORTB5));
+		
+		LowPower.powerDown(SLEEP_2S, ADC_OFF, BOD_OFF); // allow oscillator to stabilise before measuring frequency
+		
+		advanceTimer(2000L);
+		// To do:  check whether can shorten sleep to reduce power consumption
+
+		uint16_t maxCounts = ( 1 << nCount ); // keep as powers of 2
+		uint32_t result = 0L;
+		overFlowCount = 0;
+		byte mask = (1 << PIND3);
+		byte state = PIND & mask;
+		
+		while((PIND & mask) == state) {;;} // wait for transition
+		TCNT2 = 0; //reset Timer2 counter
+		TIMSK2 |= (1 << TOIE2);  // enable overflow interrupt
+		TIMSK0 = 0; // turn off timer0 for lower jitter.  Note disables millis()
+		// assume that timer1 is not enabled
+		
+		
+		for (uint16_t i = 0; i < maxCounts; i++)
+		{
+			while((PIND & mask) != state) {;;} // wait for transition
+			while((PIND & mask) == state) {;;} // wait for transition
+		}
+		cli();
+		byte count = TCNT2;
+		result = overFlowCount;
+		if( TIFR2 & (1 << TOV2)); //grab the timer2 overflow flag value; see datasheet pg. 160
+		{
+			result++; //force the overflow count to increment
+			TIFR2 |= (1 << TOV2);	// the flag is cleared by writing a logical one to it
+		}
+		TIMSK2 &= ~(1 << TOIE2);  // mask overflow interrupt
+		sei();
+		TIMSK0 = 1; // turn timer0 back on
+		result = result << 8;
+		result |= count;
+		
+		
+
+		// power-down oscillator
+		// power-down counter board
+		PORTB ^= ((1 << PORTB0) | (1 << PORTB1) | (1 << PORTB2) | (1 << PORTB5));
+
+		/*
+		locate the binary point for the count:  8 + nCount bits in total; the binary point is to the right of the nCount bit
+		with enumeration of bits 0, 1, 2, 3 . . .
+		*/
+		
+		//to convert to microsec: divide count by clockFrequency; divide by nCount; multiply by prescaler
+		payloadTime.bin2usCoarse = clockFrequency +  nCount - preScaler[preScalerSelect];
+		payloadTime.bin2usFine = 0;
+		
+		uint32_t time2Measure = result << (preScaler[preScalerSelect] - clockFrequency);// approximate estimate in usec
+		advanceTimer(roundDiv(time2Measure , 1000L));
+
+		#if USE_SER
+
+		//print result
+		Serial.begin(115200);
+		delay(1); // no need for sleep to save power since running serial
+		
+		/*
+		Converting binary fractions to decimal ones
+		power of 10 determines number of decimal places
+		n decimal ~ m binary * log10(2)
+		divide number of binary places by 3 to find power of 10
+		*/
+
+		
+		Serial.print(F("time= "));
+		Serial.print(millis());
+		Serial.print(F(" finalCoarse= "));
+		Serial.print(result >> payloadTime.bin2usCoarse);
+		Serial.print(F("."));
+		Serial.println(((result & ((1L << payloadTime.bin2usCoarse) - 1L)) * 100) >> payloadTime.bin2usCoarse);
+		Serial.flush();
+		Serial.end();
+		
+		#endif // USE_SER
+		
+		
+		// assemble packet
+		// with the original measurements and the positions of the binary point to convert them to microsec
+		// 14 bytes in packet
+		payloadTime.nodeId = (node | 0x10); // bit 5
+		payloadTime.varCoarse = 0;
+		payloadTime.varFine = 0;
+		payloadTime.coarseTime = result;
+		payloadTime.fineTime = 0;
+		sendTimePacket();
+		
+		
+	} // end measureOsc
+	
+} // end loop()
+
+
+//////////////////////////////////end///////////////////////////////////////
+
+
+
+
