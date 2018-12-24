@@ -30,7 +30,7 @@ v3 combines status and freq count packets
 #include <util/atomic.h>
 
 #define INC_COUNT() overFlowCount += 1
-#define USE_SER 1
+#define USE_SER 0
 
 
 
@@ -59,7 +59,7 @@ uint8_t preScaler[8] = {0, 0, 3, 5, 6, 7, 8, 10}; // powers of 2
 const uint8_t clockFrequency = 4; // i.e. 2^4 in MHz
 uint8_t preScalerSelect = 1; // i.e.divide by 1
 const uint8_t nCount = 8; // number to average is 2^nCount
-const uint8_t countToMicrosec = clockFrequency + nCount - preScaler[preScalerSelect];
+const uint8_t convert2Microsec = clockFrequency + nCount - preScaler[preScalerSelect];
 //to convert to microsec: divide count by clockFrequency; divide by nCount; multiply by prescaler
 
 bool initialized = false; // when false can use for debug/learn
@@ -87,9 +87,9 @@ RH_ASK driver(baud, receive_pin, transmit_pin);//speed, Rx pin, Tx pin
 const byte nVcc = 6; // ADC reads to determine Vcc; power of 2
 
 extern volatile unsigned long timer0_millis;
-const uint32_t periodStatusReport = 60000L;
-const uint32_t periodMeasurement = 20000L; // changed to check effect of polarisation
-uint32_t nextStatusReport = periodStatusReport;
+const uint32_t periodStatusReport = 600000L;
+const uint32_t periodMeasurement = 600000L; // changed to check effect of polarisation
+uint32_t nextStatusReport = 300000L;
 uint32_t nextMeasurement = periodMeasurement;
 uint32_t now = 0L; // beginning of time
 
@@ -264,7 +264,7 @@ uint32_t measureVcc()
 	#endif
 
 
-	uint32_t result = (1 << nVcc) * 1173751L / readADC( muxVal, nVcc); // Calculate Vcc (in mV); estimated as intRef_Volts*1023*1000 = 1125300L
+	uint32_t result = (1 << nVcc) * 1119483L / readADC( muxVal, nVcc); // Calculate Vcc (in mV); estimated as intRef_Volts*1023*1000 = 1125300L
 	return result; // Vcc in millivolts
 	
 }
@@ -371,7 +371,7 @@ void setup()
 
 
 	payload.count = 0;
-	payload.nodeId = node | (countToMicrosec << 8);
+	payload.nodeId = node | (convert2Microsec << 4);
 
 	flashLED(7);
 	
@@ -485,12 +485,12 @@ void loop()
 		Serial.print(payload.temp);
 		Serial.print(F(" Vcc= "));
 		Serial.print(payload.Vcc);
-		Serial.print(F("timestamp= "));
+		Serial.print(F(" timestamp= "));
 		Serial.print(millis());
 		Serial.print(F(" period= "));
-		Serial.print(result >> countToMicrosec);
+		Serial.print(result >> convert2Microsec);
 		Serial.print(F("."));
-		Serial.println(((result & ((1L << countToMicrosec) - 1L)) * 100) >> countToMicrosec);
+		Serial.println(((result & ((1L << convert2Microsec) - 1L)) * 100) >> convert2Microsec);
 		Serial.flush();
 		Serial.end();
 		
