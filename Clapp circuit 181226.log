@@ -1,0 +1,74 @@
+Circuit: buffered Clapp circuit for Soil Sensor Mark 1
+
+ltra_soil: using linear interpolation because trytocompact option specified
+ltra_air: using linear interpolation because trytocompact option specified
+.OP point found by inspection.
+.step epsilonsoil=1
+.step epsilonsoil=2
+.step epsilonsoil=3
+.step epsilonsoil=4
+.step epsilonsoil=5
+.step epsilonsoil=6
+.step epsilonsoil=7
+.step epsilonsoil=8
+.step epsilonsoil=9
+.step epsilonsoil=10
+
+
+Measurement: unitcap
+  step	capunitlen
+     1	1.01717e-013
+     2	1.01717e-013
+     3	1.01717e-013
+     4	1.01717e-013
+     5	1.01717e-013
+     6	1.01717e-013
+     7	1.01717e-013
+     8	1.01717e-013
+     9	1.01717e-013
+    10	1.01717e-013
+
+Measurement: tdiff
+  step	tdiff	FROM	TO
+     1	1.29416e-007	9.62835e-009	1.39044e-007
+     2	1.42714e-007	4.16507e-009	1.46879e-007
+     3	1.54055e-007	1.35162e-008	1.67572e-007
+     4	1.63848e-007	2.40961e-010	1.64089e-007
+     5	1.7198e-007	1.43968e-008	1.86376e-007
+     6	1.78794e-007	8.15988e-009	1.86954e-007
+     7	1.85151e-007	7.95548e-009	1.93107e-007
+     8	1.905e-007	9.2964e-009	1.99796e-007
+     9	1.9538e-007	7.73505e-009	2.03115e-007
+    10	1.99606e-007	2.22702e-009	2.01833e-007
+
+Measurement: frequency
+  step	10/(tdiff)
+     1	7.72701e+007
+     2	7.00702e+007
+     3	6.49117e+007
+     4	6.10323e+007
+     5	5.81464e+007
+     6	5.59303e+007
+     7	5.40099e+007
+     8	5.24936e+007
+     9	5.11823e+007
+    10	5.00986e+007
+
+
+Date: Wed Dec 26 09:30:20 2018
+Total elapsed time: 11.167 seconds.
+
+tnom = 27
+temp = 27
+method = modified trap
+totiter = 426957
+traniter = 426957
+tranpoints = 149490
+accept = 138881
+rejected = 10609
+matrix size = 21
+fillins = 13
+solver = Normal
+Matrix Compiler1:     116 opcodes  0.9/[0.5]/0.6
+Matrix Compiler2: 1.98 KB object code size  0.5/0.6/[0.4]
+
