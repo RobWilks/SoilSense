@@ -22,14 +22,23 @@ The low frequency is measured using a 16MHz 5V Promini and the result sent to a 
 Repository contains:
 
 Clapp circuit 181226.log	:	LTSpice simulation of Clapp oscillator and transmission line
+
 ReadNodeDataNew.R	:	R analysis of data from soil probe
+
 Schematic_Soil-Sense-Mark-1_buffered-Clapp-circuit_20181225231505.pdf	:	Schematic of circuit for SoilSenseMark1 from EasyEDA
+
 SketchVxx.cpp	:	Old - hidden
+
 SoilSenseMark1	:	C++ code for ProMini measurement and reporting sequence
+
 SoilSenseMark2	:	C++ code for ProMini measurement and reporting sequence
+
 SoilSenseMark2_board.pdf	:	Vero board design for SoilSenseMark2 from Eagle
+
 SoilSenseMark2_schematic.pdf	:	Schematic of circuit for SoilSenseMark2 from Eagle
+
 freqCounterV4.brd	:	Vero board design for SoilSenseMark2 from Eagle
+
 freqCounterV4.sch	:	Schematic of circuit for SoilSenseMark2 from Eagle
 
 
