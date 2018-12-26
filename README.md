@@ -17,3 +17,19 @@ Uses a Motorola VCO MC1648 a toroidal inductor of 9 turns and 10pF cpacitor in t
 Marks I & II use the same prescaler and counter circuits to convert the high frequency oscillation to a low frequency square wave, reducing the frequency by 1/2^17 
 
 The low frequency is measured using a 16MHz 5V Promini and the result sent to a gateway using a cheap 433MHz RF transmitter 
+
+
+Repository contains:
+
+Clapp circuit 181226.log	:	LTSpice simulation of Clapp oscillator and transmission line
+ReadNodeDataNew.R	:	R analysis of data from soil probe
+Schematic_Soil-Sense-Mark-1_buffered-Clapp-circuit_20181225231505.pdf	:	Schematic of circuit for SoilSenseMark1 from EasyEDA
+SketchVxx.cpp	:	Old - hidden
+SoilSenseMark1	:	C++ code for ProMini measurement and reporting sequence
+SoilSenseMark2	:	C++ code for ProMini measurement and reporting sequence
+SoilSenseMark2_board.pdf	:	Vero board design for SoilSenseMark2 from Eagle
+SoilSenseMark2_schematic.pdf	:	Schematic of circuit for SoilSenseMark2 from Eagle
+freqCounterV4.brd	:	Vero board design for SoilSenseMark2 from Eagle
+freqCounterV4.sch	:	Schematic of circuit for SoilSenseMark2 from Eagle
+
+
