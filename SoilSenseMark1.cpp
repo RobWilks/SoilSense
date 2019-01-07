@@ -6,6 +6,8 @@
 
 /*
 
+VERSION FOR SOIL SENSE MARK 1
+
 
 v3 working with Uno and Promini.  Mirror file on AtmelStudio
 v4 with inclusion of OneWire to read DS18b20 digital thermometer
@@ -21,6 +23,8 @@ improve the estimate of measurement time
 
 adds overrun interrupt for TIMER2
 replaces INT1 with direct monitoring of D3
+
+circuit uses direct power from ports which is not recommended practice!
 */
 
 #include <OneWire.h>
@@ -48,11 +52,15 @@ replaces INT1 with direct monitoring of D3
 
 volatile uint32_t overFlowCount;
 
-const int pinOutputCounter = 3;
-const int pinPowerCounter = 5;
-const int pinPowerOsc1 = 6;
-const int pinPowerOsc2 = 6;
-const int pinLed = 13;
+/*
+pinOutputCounter = 3;
+pinPowerCounter = 5;
+pinLed = 13;
+*/
+const byte mask = (1 << PIND3);
+
+const byte pinPowerOsc1 = 6;
+const byte pinPowerOsc2 = 6;
 const byte receive_pin = -1;
 const byte transmit_pin = 12;
 const byte digT_pin = 8;
@@ -63,6 +71,8 @@ uint8_t preScaler[8] = {0, 0, 3, 5, 6, 7, 8, 10}; // powers of 2
 const uint8_t clockFrequency = 4; // i.e. 2^4 in MHz
 uint8_t preScalerSelect = 1; // i.e.divide by 1
 const uint8_t nCount = 8; // number to average is 2^nCount
+const uint8_t convert2Microsec = clockFrequency + nCount - preScaler[preScalerSelect];
+//to convert to microsec: divide count by clockFrequency; divide by nCount; multiply by prescaler
 
 int pinPower = pinPowerOsc1;
 bool measureOsc1 = true; // first measurement is for osc1
@@ -92,9 +102,9 @@ const byte nVcc = 6; // ADC reads to determine Vcc; power of 2
 
 extern volatile unsigned long timer0_millis;
 const uint32_t periodStatusReport = 120000L;
-uint32_t periodOscReport = 20000L; // changed to check effect of polarisation
+uint32_t periodMeasurement = 20000L; // changed to check effect of polarisation
 uint32_t nextStatusReport = periodStatusReport;
-uint32_t nextOscReport = periodOscReport;
+uint32_t nextMeasurement = periodMeasurement;
 uint32_t now = 0L; // beginning of time
 
 
@@ -382,11 +392,6 @@ void setup()
 {
 
 
-	//pinMode(pinOutputCounter, INPUT);
-	//pinMode(pinPowerOsc1, OUTPUT);
-	//pinMode(pinPowerOsc2, OUTPUT);
-	//pinMode(pinPowerCounter, OUTPUT);
-	//pinMode(pinLed, OUTPUT);
 	DDRB &= 0b11110000; // pins 8, 9, 10 and 11 inputs
 	PORTB = 0b00001111; // pull-up pins 8 to 11
 	DDRB |= (1 << DDB5); // pin13 output
@@ -395,22 +400,19 @@ void setup()
 	DDRD |= ((1 << DDD5) | (1 << DDD6) | (1 << DDD7)); //pins 5, 6 and 7 outputs
 
 	/*
-	const int pinOutputCounter = 3;
-	const int pinPowerCounter = 5;
-	const int pinPowerOsc1 = 6;
-	const int pinPowerOsc2 = 7;
-	const int pinLed = 13;
-	const byte receive_pin = -1;
-	const byte transmit_pin = 12;
-	const byte digT_pin = 8;
+	pinOutputCounter = 3;
+	pinPowerCounter = 5;
+	pinPowerOsc1 = 6;
+	pinPowerOsc2 = 7;
+	pinLed = 13;
+	receive_pin = -1;
+	transmit_pin = 12;
+	digT_pin = 8;
 	*/
 
 	// turn-off the ADC
 	ADCSRA &= ~(1 << ADEN);
 	
-	// turn-off timer1
-	TIMSK1 = 0;
-
 	//set-up timer2 to "normal" operation mode.  See datasheet pg. 147, 155, & 157-158 (incl. Table 18-8).
 	//-This is important so that the timer2 counter, TCNT2, counts only UP and not also down.
 	//Note:  this messes up PWM outputs on pins 3 & 11, as well as
@@ -435,11 +437,14 @@ void setup()
 
 	payloadTime.count = 0;
 	payloadTime.nodeId = node;
+	payloadTime.bin2usCoarse = convert2Microsec;
+	payloadTime.bin2usFine = 0;
+	
 	payloadStatus.count = 0;
 	payloadStatus.nodeId = node | 0x20; // bit 5 set to indicate status packet
 	payloadStatus.empty = 0L;
 
-	flashLED(3);
+	flashLED(5);
 	
 	#if USE_SER
 
@@ -468,16 +473,14 @@ void loop()
 		nextStatusReport = now + periodStatusReport;
 		sendStatus();
 	}
-	if (now > nextOscReport)
+	if (now > nextMeasurement)
 	{
-		// measure osc
-		nextOscReport = now + periodOscReport;
+		// measure period of oscillation
+		nextMeasurement = now + periodMeasurement;
 
 
-		// start measuring using power save
-		
-		//digitalWrite(pinPower, HIGH); // power-up oscillator
-		//digitalWrite(pinPowerCounter, HIGH); // power-up counter board
+		// power-up oscillator
+		// power-up counter board
 		PORTD ^= ((1 << DDD5) | (1 << pinPower));
 		
 		LowPower.powerDown(SLEEP_2S, ADC_OFF, BOD_OFF); // allow oscillator to stabilise before measuring frequency
@@ -487,15 +490,19 @@ void loop()
 
 		uint16_t maxCounts = ( 1 << nCount ); // keep as powers of 2
 		uint32_t result = 0L;
-		overFlowCount = 0;
-		byte mask = (1 << PIND3);
+		overFlowCount = 0;// volatile
+		//any interrupt will affect the accuracy of TIMER2 count but cannot screen all interrupts so mask individually
+		TIMSK0 = 0; // turn off timer0.  Used by millis()
+		byte old_TIMSK1 = TIMSK1;
+		TIMSK1 = 0; // turn off timer1. Used by RH_ASK
+		byte old_EIMSK = EIMSK;
+		EIMSK = 0; // no external interrupts
+		
 		byte state = PIND & mask;
 		
 		while((PIND & mask) == state) {;;} // wait for transition
 		TCNT2 = 0; //reset Timer2 counter
 		TIMSK2 |= (1 << TOIE2);  // enable overflow interrupt
-		TIMSK0 = 0; // turn off timer0 for lower jitter.  Note disables millis()
-		// assume that timer1 is not enabled
 		
 		
 		for (uint16_t i = 0; i < maxCounts; i++)
@@ -508,29 +515,30 @@ void loop()
 		result = overFlowCount;
 		if( TIFR2 & (1 << TOV2)); //grab the timer2 overflow flag value; see datasheet pg. 160
 		{
-			result++; //force the overflow count to increment
+			result++; //increment the overflow count
 			TIFR2 |= (1 << TOV2);	// the flag is cleared by writing a logical one to it
 		}
 		TIMSK2 &= ~(1 << TOIE2);  // mask overflow interrupt
 		sei();
+		// reset all other interrupt masks
 		TIMSK0 = 1; // turn timer0 back on
+		TIMSK1 = old_TIMSK1;
+		EIMSK = old_EIMSK;
+		
 		result = result << 8;
 		result |= count;
 		
 		
 
-		//digitalWrite(pinPower, LOW); // power-down oscillator
-		//digitalWrite(pinPowerCounter, LOW); // power-down counter board
-		PORTD ^= ((1 << DDD5) | (1 << pinPower));
+		// power-down oscillator
+		// power-down counter board
+		PORTD ^= ((1 << PORTD5) | (1 << pinPower));
 
 		/*
 		locate the binary point for the count:  8 + nCount bits in total; the binary point is to the right of the nCount bit
 		with enumeration of bits 0, 1, 2, 3 . . .
 		*/
 		
-		//to convert to microsec: divide count by clockFrequency; divide by nCount; multiply by prescaler
-		payloadTime.bin2usCoarse = clockFrequency +  nCount - preScaler[preScalerSelect];
-		payloadTime.bin2usFine = 0;
 		
 		uint32_t time2Measure = result << (preScaler[preScalerSelect] - clockFrequency);// approximate estimate in usec
 		advanceTimer(roundDiv(time2Measure , 1000L));
