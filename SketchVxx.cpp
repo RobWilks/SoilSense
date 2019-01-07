@@ -51,7 +51,7 @@ volatile uint32_t overFlowCount;
 const int pinOutputCounter = 3;
 const int pinPowerCounter = 5;
 const int pinPowerOsc1 = 6;
-const int pinPowerOsc2 = 7;
+const int pinPowerOsc2 = 6;
 const int pinLed = 13;
 const byte receive_pin = -1;
 const byte transmit_pin = 12;
@@ -91,8 +91,8 @@ RH_ASK driver(baud, receive_pin, transmit_pin);//speed, Rx pin, Tx pin
 const byte nVcc = 6; // ADC reads to determine Vcc; power of 2
 
 extern volatile unsigned long timer0_millis;
-const uint32_t periodStatusReport = 600000L;
-uint32_t periodOscReport = 120000L; // changed to check effect of polarisation
+const uint32_t periodStatusReport = 120000L;
+uint32_t periodOscReport = 20000L; // changed to check effect of polarisation
 uint32_t nextStatusReport = periodStatusReport;
 uint32_t nextOscReport = periodOscReport;
 uint32_t now = 0L; // beginning of time
