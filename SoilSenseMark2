@@ -49,6 +49,7 @@ pinPowerCounter = 10;
 pinPowerOsc = 9;
 pinLed = 13;
 */
+const byte mask = (1 << PIND3); //mask for input pin to frequency counter
 const byte receive_pin = -1;
 const byte transmit_pin = 12;
 const byte digT_pin = 11;
@@ -88,7 +89,7 @@ const byte nVcc = 6; // ADC reads to determine Vcc; power of 2
 
 extern volatile unsigned long timer0_millis;
 const uint32_t periodStatusReport = 600000L;
-const uint32_t periodMeasurement = 600000L; // changed to check effect of polarisation
+const uint32_t periodMeasurement = 120000L; // changed to check effect of polarisation
 uint32_t nextStatusReport = 300000L;
 uint32_t nextMeasurement = periodMeasurement;
 uint32_t now = 0L; // beginning of time
@@ -345,8 +346,6 @@ void setup()
 	// turn-off the ADC
 	ADCSRA &= ~(1 << ADEN);
 	
-	// turn-off timer1
-	TIMSK1 = 0;
 
 	//set-up timer2 to "normal" operation mode.  See datasheet pg. 147, 155, & 157-158 (incl. Table 18-8).
 	//-This is important so that the timer2 counter, TCNT2, counts only UP and not also down.
@@ -416,22 +415,25 @@ void loop()
 		// power-up counter board
 		PORTB ^= ((1 << PORTB0) | (1 << PORTB1) | (1 << PORTB2) | (USE_SER << PORTB5));
 		
-		LowPower.powerDown(SLEEP_2S, ADC_OFF, BOD_OFF); // allow oscillator to stabilise before measuring frequency
+		LowPower.powerDown(SLEEP_500MS, ADC_OFF, BOD_OFF); // allow oscillator to stabilise before measuring frequency
 		
-		advanceTimer(2000L);
+		advanceTimer(500L);
 		// To do:  check whether can shorten sleep to reduce power consumption
 
 		uint16_t maxCounts = ( 1 << nCount ); // keep as powers of 2
 		uint32_t result = 0L;
-		overFlowCount = 0;
-		byte mask = (1 << PIND3);
+		overFlowCount = 0; // volatile
+		//any interrupt will affect the accuracy of TIMER2 count but cannot screen all interrupts so mask individually
+		TIMSK0 = 0; // turn off timer0.  Used by millis()
+		byte old_TIMSK1 = TIMSK1;
+		TIMSK1 = 0; // turn off timer1. Used by RH_ASK
+		byte old_EIMSK = EIMSK;
+		EIMSK = 0; // no external interrupts
+
 		byte state = PIND & mask;
-		
 		while((PIND & mask) == state) {;;} // wait for transition
 		TCNT2 = 0; //reset Timer2 counter
 		TIMSK2 |= (1 << TOIE2);  // enable overflow interrupt
-		TIMSK0 = 0; // turn off timer0 for lower jitter.  Note disables millis()
-		// assume that timer1 is not enabled
 		
 		
 		for (uint16_t i = 0; i < maxCounts; i++)
@@ -444,12 +446,15 @@ void loop()
 		result = overFlowCount;
 		if( TIFR2 & (1 << TOV2)); //grab the timer2 overflow flag value; see datasheet pg. 160
 		{
-			result++; //force the overflow count to increment
+			result++; //increment the overflow count
 			TIFR2 |= (1 << TOV2);	// the flag is cleared by writing a logical one to it
 		}
-		TIMSK2 &= ~(1 << TOIE2);  // mask overflow interrupt
+		TIMSK2 &= ~(1 << TOIE2);  // mask overflow interrupt; ensures no overflow interrupt can occur at the moment the counter is reset
 		sei();
+		// reset all other interrupt masks
 		TIMSK0 = 1; // turn timer0 back on
+		TIMSK1 = old_TIMSK1;
+		EIMSK = old_EIMSK;
 		result = result << 8;
 		result |= count;
 		
