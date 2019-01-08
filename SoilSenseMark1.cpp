@@ -25,6 +25,8 @@ adds overrun interrupt for TIMER2
 replaces INT1 with direct monitoring of D3
 
 circuit uses direct power from ports which is not recommended practice!
+
+changed 8/1/19 to use one packet type only
 */
 
 #include <OneWire.h>
@@ -60,7 +62,7 @@ pinLed = 13;
 const byte mask = (1 << PIND3);
 
 const byte pinPowerOsc1 = 6;
-const byte pinPowerOsc2 = 6;
+const byte pinPowerOsc2 = 7;
 const byte receive_pin = -1;
 const byte transmit_pin = 12;
 const byte digT_pin = 8;
@@ -72,18 +74,20 @@ const uint8_t clockFrequency = 4; // i.e. 2^4 in MHz
 uint8_t preScalerSelect = 1; // i.e.divide by 1
 const uint8_t nCount = 8; // number to average is 2^nCount
 const uint8_t convert2Microsec = clockFrequency + nCount - preScaler[preScalerSelect];
-//to convert to microsec: divide count by clockFrequency; divide by nCount; multiply by prescaler
+/*
+to locate the binary point for the count:  8 + nCount bits in total; the binary point is to the right of the nCount bit
+with enumeration of bits 0, 1, 2, 3 . . .
+
+to convert to microsec: divide count by clockFrequency; divide by nCount; multiply by prescaler
+*/
 
 int pinPower = pinPowerOsc1;
 bool measureOsc1 = true; // first measurement is for osc1
 bool initialized = false; // when false can use for debug/learn
-// store results here
-uint32_t meanResults;
-
 
 
 const int baud = 500;
-const byte node = 12;
+const byte node = 14;
 
 OneWire  ds(digT_pin);  // a 4.7K pull-up resistor is necessary
 // digital temperature sensor
@@ -115,30 +119,14 @@ uint32_t bitDiv(uint32_t a, byte b);
 typedef struct {
 	byte nodeId; //store this nodeId
 	byte count;
-	byte bin2usCoarse;
-	byte bin2usFine;
-	byte varCoarse;
-	byte varFine;
-	unsigned long coarseTime;
-	unsigned long fineTime;
-} PayloadItem;
-// count keeps track of the # packets sent out
-
-PayloadItem payloadTime;
-
-
-////////////////////////////////////struct PayloadItem2/////////////////////////////////////
-typedef struct {
-	byte nodeId; //store this nodeId
-	byte count;
 	int temp;
 	int Vcc;
-	unsigned long millisec;
-	unsigned long empty;
-} PayloadItem2;
-// time is approximate since  using only watchdog timer
+	unsigned long timeStamp;
+	unsigned long periodOfSignal;
+	} PayloadItem;
+// count keeps track of the # packets sent out
 
-PayloadItem2 payloadStatus;
+PayloadItem payload;
 
 
 //////////////////////////////////Initialise the ISR///////////////////////////////////////
@@ -185,23 +173,14 @@ void flashLED(byte nTimes)
 	}
 
 }
-//////////////////////////////////sendTimePacket///////////////////////////////////////
+//////////////////////////////////sendPacket///////////////////////////////////////
 
-void sendTimePacket()
+void sendPacket()
 {
 	// send packet
-	driver.send((uint8_t*)(&payloadTime), sizeof(payloadTime));
+	driver.send((uint8_t*)(&payload), sizeof(payload));
 	driver.waitPacketSent();
-	++payloadTime.count;
-}
-//////////////////////////////////sendStatusPacket///////////////////////////////////////
-
-void sendStatusPacket()
-{
-	// send packet
-	driver.send((uint8_t*)(&payloadStatus), sizeof(payloadStatus));
-	driver.waitPacketSent();
-	++payloadStatus.count;
+	++payload.count;
 }
 //////////////////////////////////setPrescaler///////////////////////////////////////
 void setPrescaler(byte value)
@@ -362,29 +341,6 @@ int16_t measureTemp()
 	return(tmp);
 }
 
-//////////////////////////////////sendStatus///////////////////////////////////////
-void sendStatus()
-{
-	//assemble packet
-	payloadStatus.temp = measureTemp();
-	payloadStatus.Vcc = measureVcc();
-	payloadStatus.millisec = now;
-	sendStatusPacket();
-	#if USE_SER
-	Serial.begin(115200);
-	delay(1);
-	Serial.print(F("temp= "));
-	Serial.print(payloadStatus.temp);
-	Serial.print(F(" Vcc= "));
-	Serial.print(payloadStatus.Vcc);
-	Serial.print(F(" millisec= "));
-	Serial.println(payloadStatus.millisec);
-	Serial.flush();
-	Serial.end();
-	#endif
-	
-}
-
 
 //////////////////////////////////setup///////////////////////////////////////
 
@@ -435,15 +391,8 @@ void setup()
 	}
 
 
-	payloadTime.count = 0;
-	payloadTime.nodeId = node;
-	payloadTime.bin2usCoarse = convert2Microsec;
-	payloadTime.bin2usFine = 0;
+	payload.count = 0;
 	
-	payloadStatus.count = 0;
-	payloadStatus.nodeId = node | 0x20; // bit 5 set to indicate status packet
-	payloadStatus.empty = 0L;
-
 	flashLED(5);
 	
 	#if USE_SER
@@ -471,7 +420,10 @@ void loop()
 	if (now > nextStatusReport)
 	{
 		nextStatusReport = now + periodStatusReport;
-		sendStatus();
+		payload.temp = measureTemp();
+		payload.Vcc = measureVcc();
+		//will send when new frequency data are available
+
 	}
 	if (now > nextMeasurement)
 	{
@@ -479,6 +431,8 @@ void loop()
 		nextMeasurement = now + periodMeasurement;
 
 
+		// toggle LED
+		PORTB ^= (USE_SER << PORTB5);
 		// power-up oscillator
 		// power-up counter board
 		PORTD ^= ((1 << DDD5) | (1 << pinPower));
@@ -528,16 +482,12 @@ void loop()
 		result = result << 8;
 		result |= count;
 		
-		
-
+		// toggle LED
+		PORTB ^= (USE_SER << PORTB5);
 		// power-down oscillator
 		// power-down counter board
 		PORTD ^= ((1 << PORTD5) | (1 << pinPower));
 
-		/*
-		locate the binary point for the count:  8 + nCount bits in total; the binary point is to the right of the nCount bit
-		with enumeration of bits 0, 1, 2, 3 . . .
-		*/
 		
 		
 		uint32_t time2Measure = result << (preScaler[preScalerSelect] - clockFrequency);// approximate estimate in usec
@@ -557,12 +507,16 @@ void loop()
 		*/
 
 		
-		Serial.print(F("time= "));
+		Serial.print(F("temp= "));
+		Serial.print(payload.temp);
+		Serial.print(F(" Vcc= "));
+		Serial.print(payload.Vcc);
+		Serial.print(F(" timestamp= "));
 		Serial.print(millis());
-		Serial.print(F(" finalCoarse= "));
-		Serial.print(result >> payloadTime.bin2usCoarse);
+		Serial.print(F(" period= "));
+		Serial.print(result >> convert2Microsec);
 		Serial.print(F("."));
-		Serial.println(((result & ((1L << payloadTime.bin2usCoarse) - 1L)) * 100) >> payloadTime.bin2usCoarse);
+		Serial.println(((result & ((1L << convert2Microsec) - 1L)) * 100) >> convert2Microsec);
 		Serial.flush();
 		Serial.end();
 		
@@ -572,24 +526,15 @@ void loop()
 		// assemble packet
 		// with the original measurements and the positions of the binary point to convert them to microsec
 		// 14 bytes in packet
-		payloadTime.nodeId = (node | ((byte)measureOsc1 << 4)); // bit 5
-		payloadTime.varCoarse = 0;
-		payloadTime.varFine = 0;
-		payloadTime.coarseTime = result;
-		payloadTime.fineTime = 0;
-		sendTimePacket();
-		
-		
-
-
-
-
-
-		
+		payload.nodeId = node | (convert2Microsec << 4);
+		if (!measureOsc1) payload.nodeId++;
+		payload.timeStamp = millis();
+		payload.periodOfSignal = result;
+		sendPacket();
 		// switch pins ready for next measurement
 		measureOsc1 = !measureOsc1;
 		pinPower = (measureOsc1 ? pinPowerOsc1 : pinPowerOsc2);
-	} // end measureOsc
+	} // end measurePeriodOfSignal
 	
 } // end loop()
 
