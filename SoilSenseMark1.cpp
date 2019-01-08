@@ -101,10 +101,10 @@ RH_ASK driver(baud, receive_pin, transmit_pin);//speed, Rx pin, Tx pin
 const byte nVcc = 6; // ADC reads to determine Vcc; power of 2
 
 extern volatile unsigned long timer0_millis;
-const uint32_t periodStatusReport = 120000L;
-uint32_t periodMeasurement = 20000L; // changed to check effect of polarisation
-uint32_t nextStatusReport = periodStatusReport;
-uint32_t nextMeasurement = periodMeasurement;
+const uint32_t periodStatusReport = 600000L;
+uint32_t periodMeasurement = 120000L; // changed to check effect of polarisation
+uint32_t nextStatusReport = 60000L;
+uint32_t nextMeasurement = 0L;
 uint32_t now = 0L; // beginning of time
 
 
